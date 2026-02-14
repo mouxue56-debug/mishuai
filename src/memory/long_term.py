@@ -133,7 +133,7 @@ class LongTermMemory:
         async with self._db.execute(
             """SELECT id, content, category, created_at
                FROM memos WHERE is_archived = 0
-               ORDER BY created_at DESC LIMIT ?""",
+               ORDER BY id DESC LIMIT ?""",
             (limit,),
         ) as cursor:
             rows = await cursor.fetchall()

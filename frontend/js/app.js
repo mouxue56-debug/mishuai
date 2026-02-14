@@ -1,7 +1,12 @@
 /**
- * Main Application - Fukuraku AI Secretary Frontend
+ * Main Application - Fukuraku AI Secretary Frontend (v0.2)
  *
- * Wires up WebSocket, Live2D, lip sync, and UI components.
+ * Wires up WebSocket, Live2D, lip sync, audio playback, and UI components.
+ *
+ * v0.2 changes:
+ * - Audio playback via WebSocket base64 data
+ * - CDN-based Live2D model (Hiyori) as default
+ * - Improved audio handling with Web Audio API
  */
 
 // --- Global instances ---
@@ -9,10 +14,14 @@ let wsClient;
 let live2d;
 let subtitleTimer = null;
 let isMuted = false;
+let audioContext = null;
 
 // --- Initialize ---
 document.addEventListener('DOMContentLoaded', async () => {
-    console.log('[App] Initializing Fukuraku AI Secretary Frontend...');
+    console.log('[App] Initializing Fukuraku AI Secretary Frontend v0.2...');
+
+    // Initialize Audio Context (needed for audio playback)
+    initAudioContext();
 
     // Initialize WebSocket
     wsClient = new WSClient();
@@ -23,9 +32,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     live2d = new Live2DController();
     await live2d.initialize('live2d-canvas');
 
-    // Try to load a model (user needs to provide the model file)
-    // Default: look for a model in the models/ directory
-    tryLoadModel();
+    // Load Live2D model
+    await tryLoadModel();
 
     // Handle window resize
     window.addEventListener('resize', () => {
@@ -44,6 +52,56 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     console.log('[App] Initialized');
 });
+
+// --- Audio Context Setup ---
+function initAudioContext() {
+    // Create AudioContext on first user interaction (browser policy)
+    const resume = () => {
+        if (!audioContext) {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioContext.state === 'suspended') {
+            audioContext.resume();
+        }
+    };
+    document.addEventListener('click', resume, { once: true });
+    document.addEventListener('keydown', resume, { once: true });
+}
+
+/**
+ * Play base64-encoded audio data received from the backend.
+ * @param {string} b64data - Base64-encoded audio (WAV or MP3)
+ * @param {string} format - Audio format ('wav' or 'mp3')
+ */
+async function playAudioB64(b64data, format) {
+    if (isMuted) return;
+
+    if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    try {
+        // Decode base64 to ArrayBuffer
+        const binaryStr = atob(b64data);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+            bytes[i] = binaryStr.charCodeAt(i);
+        }
+
+        // Decode audio
+        const audioBuffer = await audioContext.decodeAudioData(bytes.buffer);
+
+        // Play
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+        source.start(0);
+
+        console.log(`[Audio] Playing ${format} audio (${(audioBuffer.duration).toFixed(1)}s)`);
+    } catch (e) {
+        console.error('[Audio] Playback error:', e);
+    }
+}
 
 // --- WebSocket Handlers ---
 function setupWSHandlers() {
@@ -92,6 +150,13 @@ function setupWSHandlers() {
         }
     });
 
+    // NEW: Handle base64 audio from backend
+    wsClient.on('audio', (data) => {
+        if (data.data) {
+            playAudioB64(data.data, data.format || 'wav');
+        }
+    });
+
     wsClient.on('status', (data) => {
         const statusMap = {
             idle: '待機中',
@@ -103,8 +168,8 @@ function setupWSHandlers() {
     });
 
     wsClient.on('subtitle', (data) => {
-        showSubtitle(data.text);
         if (data.role === 'user') {
+            showSubtitle(data.text);
             addChatMessage(data.text, 'user');
         }
     });
@@ -220,17 +285,22 @@ function setLanguage(lang) {
 // --- Model Loading ---
 
 async function tryLoadModel() {
-    // Try common model paths
-    const modelPaths = [
+    // Priority order:
+    // 1. Local models in frontend/models/
+    // 2. CDN-hosted official free models (Hiyori)
+    const localPaths = [
         'models/model.model3.json',
-        'models/haru/haru.model3.json',
-        'models/mao/mao.model3.json',
+        'models/haru/Haru.model3.json',
+        'models/hiyori/Hiyori.model3.json',
+        'models/mao/Mao.model3.json',
     ];
 
-    for (const path of modelPaths) {
+    // Try local models first
+    for (const path of localPaths) {
         try {
             const response = await fetch(path, { method: 'HEAD' });
             if (response.ok) {
+                console.log(`[App] Found local model: ${path}`);
                 await live2d.loadModel(path);
                 return;
             }
@@ -239,9 +309,18 @@ async function tryLoadModel() {
         }
     }
 
-    console.info(
-        '[App] No Live2D model found. Place a model in frontend/models/ directory.\n' +
-        'You can get free models from: https://booth.pm/\n' +
-        'Expected format: .model3.json (Cubism 3/4 format)'
-    );
+    // Fallback: Use CDN-hosted Hiyori model (free, official Live2D sample)
+    const cdnModelUrl = 'https://cdn.jsdelivr.net/gh/Live2D/CubismWebSamples@develop/Samples/Resources/Hiyori/Hiyori.model3.json';
+    console.log('[App] No local model found, loading Hiyori from CDN...');
+    try {
+        await live2d.loadModel(cdnModelUrl);
+        console.log('[App] CDN model loaded successfully');
+    } catch (e) {
+        console.warn('[App] CDN model load failed:', e);
+        console.info(
+            '[App] To use Live2D offline, download models from:\n' +
+            '  https://github.com/Live2D/CubismWebSamples\n' +
+            '  Place in frontend/models/ directory'
+        );
+    }
 }

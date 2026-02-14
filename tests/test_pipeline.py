@@ -157,3 +157,147 @@ class TestLLMRouter:
         prompt = router._build_system_prompt(profile)
         assert "ウィルさん" in prompt
         assert "カジュアル" in prompt
+
+    # --- v0.2: Enhanced JSON parsing tests ---
+
+    def test_parse_tool_call_singular(self):
+        """tool_call (singular) should be normalized to tool_calls array."""
+        router = LLMRouter()
+        response = router._parse_response(
+            '{"text": "検索しますね", "emotion": "thinking", "tool_call": {"name": "search_customers", "arguments": {"query": "佐藤"}}}',
+            "test-model"
+        )
+        assert response.text == "検索しますね"
+        assert len(response.tool_calls) == 1
+        assert response.tool_calls[0]["name"] == "search_customers"
+
+    def test_parse_emotion_inline_tag(self):
+        """[EMOTION:tag] inline format should be parsed."""
+        router = LLMRouter()
+        response = router._parse_response(
+            "[EMOTION:happy] はい、わかりました！",
+            "test-model"
+        )
+        assert response.text == "はい、わかりました！"
+        assert response.emotion == "happy"
+
+    def test_parse_emotion_inline_fullwidth_colon(self):
+        """[EMOTION：tag] with fullwidth colon should also work."""
+        router = LLMRouter()
+        response = router._parse_response(
+            "[EMOTION：excited] すごいですね！",
+            "test-model"
+        )
+        assert response.text == "すごいですね！"
+        assert response.emotion == "excited"
+
+    def test_parse_empty_response(self):
+        """Empty string should return empty response."""
+        router = LLMRouter()
+        response = router._parse_response("", "test-model")
+        assert response.text == ""
+        assert response.model == "test-model"
+
+    def test_parse_json_missing_text_uses_raw(self):
+        """JSON without 'text' key should use raw text in embedded extraction."""
+        router = LLMRouter()
+        # Pure JSON without text key falls through to _try_parse_json which
+        # returns the dict, then _build_response_from_dict uses raw_text fallback
+        response = router._parse_response(
+            '{"emotion": "happy", "reply": "こんにちは"}',
+            "test-model"
+        )
+        # Since "text" key is missing, it uses raw_text
+        assert response.emotion == "happy"
+
+    def test_parse_code_block_without_json_tag(self):
+        """Code block without json language tag should still parse."""
+        router = LLMRouter()
+        response = router._parse_response(
+            '```\n{"text": "テスト中", "emotion": "thinking"}\n```',
+            "test-model"
+        )
+        assert response.text == "テスト中"
+        assert response.emotion == "thinking"
+
+
+class TestToolPermission:
+    """Tests for speaker-based tool permission checks in pipeline."""
+
+    def test_owner_has_all_permissions(self):
+        """Owner profile with 'all' permission should allow everything."""
+        from src.core.pipeline import DialoguePipeline
+        pipeline = DialoguePipeline()
+        profile = {"name": "Will", "permissions": ["all"]}
+        assert pipeline._check_tool_permission("search_customers", profile) is True
+        assert pipeline._check_tool_permission("add_memo", profile) is True
+        assert pipeline._check_tool_permission("set_reminder", profile) is True
+
+    def test_limited_permissions(self):
+        """Profile with specific permissions should only allow listed tools."""
+        from src.core.pipeline import DialoguePipeline
+        pipeline = DialoguePipeline()
+        profile = {"name": "Staff", "permissions": ["cattery_knowledge", "check_schedule"]}
+        assert pipeline._check_tool_permission("cattery_knowledge", profile) is True
+        assert pipeline._check_tool_permission("check_schedule", profile) is True
+        assert pipeline._check_tool_permission("add_memo", profile) is False
+        assert pipeline._check_tool_permission("search_customers", profile) is False
+
+    def test_unknown_speaker_only_knowledge(self):
+        """Unknown speaker (no profile) should only access cattery_knowledge."""
+        from src.core.pipeline import DialoguePipeline
+        pipeline = DialoguePipeline()
+        assert pipeline._check_tool_permission("cattery_knowledge", None) is True
+        assert pipeline._check_tool_permission("add_memo", None) is False
+        assert pipeline._check_tool_permission("search_customers", None) is False
+
+    def test_empty_permissions_list(self):
+        """Profile with empty permissions list should deny everything."""
+        from src.core.pipeline import DialoguePipeline
+        pipeline = DialoguePipeline()
+        profile = {"name": "Guest", "permissions": []}
+        assert pipeline._check_tool_permission("cattery_knowledge", profile) is False
+        assert pipeline._check_tool_permission("add_memo", profile) is False
+
+
+class TestConfigValidator:
+    """Tests for Pydantic-based config validation."""
+
+    def test_valid_config(self):
+        from src.utils.config_validator import validate_config
+        config = {
+            "app": {"name": "test"},
+            "llm": {"active_mode": "balanced"},
+            "websocket": {"host": "0.0.0.0", "port": 8765},
+        }
+        result = validate_config(config)
+        assert result.llm.active_mode == "balanced"
+        assert result.websocket.port == 8765
+
+    def test_invalid_llm_mode(self):
+        from src.utils.config_validator import validate_config
+        from pydantic import ValidationError
+        config = {"llm": {"active_mode": "ultra"}}
+        with pytest.raises(ValidationError):
+            validate_config(config)
+
+    def test_valid_persona(self):
+        from src.utils.config_validator import validate_persona
+        persona = {
+            "character": {"name": "ミケ", "role": "AI秘書"},
+            "emotions": {"happy": {}},
+        }
+        result = validate_persona(persona)
+        assert result.character.name == "ミケ"
+
+    def test_empty_config_uses_defaults(self):
+        from src.utils.config_validator import validate_config
+        result = validate_config({})
+        assert result.llm is None
+        assert result.websocket is None
+
+    def test_validate_configs_integration(self):
+        """Test that actual config files validate successfully."""
+        from src.utils.config_loader import validate_configs
+        valid, errors = validate_configs()
+        assert valid, f"Config validation errors: {errors}"

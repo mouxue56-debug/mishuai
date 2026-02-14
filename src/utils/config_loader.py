@@ -45,6 +45,35 @@ def load_config(config_name: str = "config") -> dict[str, Any]:
     return config
 
 
+def validate_configs() -> tuple[bool, list[str]]:
+    """Validate config.yaml and persona.yaml using Pydantic schemas.
+
+    Returns:
+        Tuple of (success, list of error messages).
+    """
+    from src.utils.config_validator import validate_config, validate_persona
+
+    errors = []
+
+    try:
+        config = load_config("config")
+        validate_config(config)
+    except FileNotFoundError:
+        errors.append("config.yaml not found")
+    except Exception as e:
+        errors.append(f"config.yaml validation: {e}")
+
+    try:
+        persona = load_config("persona")
+        validate_persona(persona)
+    except FileNotFoundError:
+        errors.append("persona.yaml not found")
+    except Exception as e:
+        errors.append(f"persona.yaml validation: {e}")
+
+    return (len(errors) == 0, errors)
+
+
 def get_main_config() -> dict[str, Any]:
     """Load the main config.yaml."""
     return load_config("config")

@@ -5,7 +5,7 @@
 # --- Application ---
 app:
   name: "Fukuraku AI Secretary"
-  version: "0.1.0"
+  version: "0.2.0"
   language: "ja"  # Primary: Japanese
   debug: false
 
@@ -99,9 +99,11 @@ audio:
     device_index: null  # null = default speaker
     sample_rate: 24000
   vad:
-    mode: 3  # WebRTC VAD aggressiveness (0-3)
+    engine: "webrtc"  # "webrtc" (lightweight) | "silero" (ML-based, more accurate)
+    mode: 3  # WebRTC VAD aggressiveness (0-3), ignored for silero
     frame_duration_ms: 30
     silence_threshold_ms: 800  # Silence duration to end utterance
+    silero_threshold: 0.5  # Silero confidence threshold (0.0-1.0)
   wake_word:
     enabled: true
     engine: "sherpa_onnx"  # "sherpa_onnx" | "custom"

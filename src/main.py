@@ -2,6 +2,12 @@
 
 Starts all subsystems and runs the main event loop.
 
+Key architectural fixes (v0.2):
+- Unified output consumer: Both voice and text modes share the same TTS/WS path
+- Audio sent via WebSocket as base64 for frontend playback (OBS-compatible)
+- Proper SPEAKING state in interrupt handler
+- Request ID tracking to prevent race conditions
+
 Usage:
     # Full system (voice + Live2D frontend)
     python -m src.main
@@ -15,9 +21,11 @@ Usage:
 
 import argparse
 import asyncio
+import base64
 import signal
-import sys
+import uuid
 
+from src.core.interrupt_handler import PipelineState
 from src.core.pipeline import DialoguePipeline
 from src.audio.microphone import MicrophoneInput
 from src.audio.asr import ASREngine
@@ -26,7 +34,7 @@ from src.audio.speaker_id import SpeakerIdentifier
 from src.audio.wake_word import WakeWordDetector
 from src.display.websocket_server import WebSocketServer
 from src.mcp.tools.memo_reminder import set_memory_manager
-from src.utils.config_loader import load_env, get_main_config
+from src.utils.config_loader import load_env, get_main_config, validate_configs
 from src.utils.logger import setup_logger, get_logger
 
 
@@ -34,7 +42,18 @@ logger = get_logger("main")
 
 
 class FukurakuSecretary:
-    """Main application class that orchestrates all subsystems."""
+    """Main application class that orchestrates all subsystems.
+
+    Architecture (v0.2):
+        Text/Voice Input → Pipeline (LLM + Tools) → Output Queue
+                                                        ↓
+                                            Unified Output Consumer
+                                            ├── TTS synthesis
+                                            ├── WS: speech_start + emotion
+                                            ├── WS: audio (base64) + lip_sync
+                                            ├── WS: speech_end
+                                            └── State: SPEAKING → IDLE
+    """
 
     def __init__(self, text_only: bool = False):
         self.text_only = text_only
@@ -59,7 +78,7 @@ class FukurakuSecretary:
     async def start(self):
         """Initialize and start all subsystems."""
         logger.info("=" * 50)
-        logger.info("  Fukuraku AI Secretary v0.1.0")
+        logger.info("  Fukuraku AI Secretary v0.2.0")
         logger.info("  福楽キャッテリー AI秘書 「ミケ」")
         logger.info("=" * 50)
 
@@ -99,6 +118,7 @@ class FukurakuSecretary:
         # Run all tasks concurrently
         tasks = [
             self.pipeline.run(),
+            self._output_consumer(),   # Unified output consumer
             self._reminder_checker(),
         ]
 
@@ -119,41 +139,115 @@ class FukurakuSecretary:
         await self.pipeline.shutdown()
         logger.info("Goodbye!")
 
-    async def _handle_text_input(self, text: str):
-        """Handle text input from the WebSocket frontend."""
-        logger.info(f"Text input: '{text}'")
+    # ----------------------------------------------------------------
+    # Unified Output Consumer
+    # ----------------------------------------------------------------
+    # This is the SINGLE place where all assistant responses are:
+    # 1. Sent to the frontend (speech_start, emotion, subtitle)
+    # 2. Synthesized to audio via TTS
+    # 3. Sent to frontend as base64 audio + lip sync data
+    # 4. State managed (SPEAKING → IDLE)
+    # Both text-only and voice modes funnel through here.
+    # ----------------------------------------------------------------
 
-        # Send to pipeline
+    async def _output_consumer(self):
+        """Unified output consumer - handles all assistant responses.
+
+        Continuously reads from the pipeline's output queue and drives:
+        TTS synthesis, WebSocket updates, lip sync, and state management.
+        """
+        while self._running:
+            try:
+                result = await asyncio.wait_for(
+                    self.pipeline.output_queue.get(), timeout=1.0
+                )
+
+                if result.get("type") != "response":
+                    continue
+
+                response = result.get("response")
+                request_id = result.get("request_id", "?")
+
+                if not response or not response.text:
+                    continue
+
+                logger.info(f"[{request_id}] Output consumer: delivering response")
+
+                # 1. Set SPEAKING state
+                self.pipeline.interrupt.set_state(PipelineState.SPEAKING)
+                self.pipeline.interrupt.clear_interrupt()
+
+                # 2. Notify frontend: speech starting
+                await self.ws_server.send_speech_start(response.text, response.emotion)
+                await self.ws_server.send_subtitle(response.text, "assistant")
+                await self.ws_server.send_status("speaking")
+
+                # 3. Synthesize TTS audio
+                audio_data = await self.tts.synthesize(response.text)
+
+                if audio_data and not self.pipeline.interrupt.should_stop():
+                    # 4. Extract lip sync data
+                    volumes = await self.tts.get_audio_for_lip_sync(audio_data)
+                    await self.ws_server.send_lip_sync(volumes)
+
+                    # 5. Send audio to frontend as base64 for playback
+                    audio_b64 = base64.b64encode(audio_data).decode("ascii")
+                    await self.ws_server.broadcast({
+                        "type": "audio",
+                        "data": audio_b64,
+                        "format": "wav",  # or "mp3" depending on TTS engine
+                        "request_id": request_id,
+                    })
+
+                    # 6. Wait for approximate playback duration
+                    # (Estimate: audio_data size / byte_rate)
+                    # WAV at 24kHz 16-bit mono = 48000 bytes/sec
+                    duration_sec = max(len(audio_data) / 48000, 0.5)
+                    try:
+                        interrupted = await self.pipeline.interrupt.wait_for_interrupt(
+                            timeout=duration_sec
+                        )
+                        if interrupted:
+                            logger.info(f"[{request_id}] Speech interrupted by user")
+                    except asyncio.CancelledError:
+                        pass
+
+                # 7. Speech ended
+                await self.ws_server.send_speech_end()
+                await self.ws_server.send_status("idle")
+                self.pipeline.interrupt.set_state(PipelineState.IDLE)
+                self.pipeline.interrupt.clear_interrupt()
+
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error(f"Output consumer error: {e}")
+                self.pipeline.interrupt.set_state(PipelineState.IDLE)
+                continue
+
+    # ----------------------------------------------------------------
+    # Input Handlers
+    # ----------------------------------------------------------------
+
+    async def _handle_text_input(self, text: str):
+        """Handle text input from the WebSocket frontend.
+
+        Simply enqueues the text into the pipeline input queue.
+        The output consumer will handle the response.
+        """
+        request_id = str(uuid.uuid4())[:8]
+        logger.info(f"[{request_id}] Text input: '{text}'")
+
+        # Show user's message as subtitle
+        await self.ws_server.send_subtitle(text, "user")
+
+        # Enqueue for pipeline processing
         await self.pipeline.input_queue.put({
             "type": "text",
             "text": text,
             "speaker_id": None,
+            "request_id": request_id,
         })
-
-        # Wait for response
-        try:
-            result = await asyncio.wait_for(self.pipeline.output_queue.get(), timeout=30)
-            response = result.get("response")
-
-            if response:
-                # Send subtitle
-                await self.ws_server.send_subtitle(text, "user")
-                await self.ws_server.send_speech_start(response.text, response.emotion)
-
-                # Synthesize and play TTS
-                audio = await self.tts.synthesize(response.text)
-                if audio:
-                    # Send lip sync data
-                    volumes = await self.tts.get_audio_for_lip_sync(audio)
-                    await self.ws_server.send_lip_sync(volumes)
-
-                    # Play audio (would need audio playback here)
-                    # For now, the frontend handles audio
-
-                await self.ws_server.send_speech_end()
-
-        except asyncio.TimeoutError:
-            logger.error("Pipeline response timeout")
 
     async def _handle_command(self, command: str, data=None):
         """Handle commands from the frontend."""
@@ -172,8 +266,16 @@ class FukurakuSecretary:
             muted = data.get("muted", False) if data else False
             logger.info(f"Mute: {muted}")
 
+    # ----------------------------------------------------------------
+    # Voice Loop
+    # ----------------------------------------------------------------
+
     async def _voice_loop(self):
-        """Main voice capture and processing loop."""
+        """Main voice capture and processing loop.
+
+        Only captures audio and enqueues transcribed text.
+        The output consumer handles the response delivery.
+        """
         if not self.microphone or not self.asr:
             return
 
@@ -192,19 +294,21 @@ class FukurakuSecretary:
                 await self.ws_server.send_status("idle")
                 return
 
-            logger.info(f"ASR: '{text}' (speaker={speaker_id})")
+            request_id = str(uuid.uuid4())[:8]
+            logger.info(f"[{request_id}] ASR: '{text}' (speaker={speaker_id})")
             await self.ws_server.send_subtitle(text, "user")
 
-            # Send to pipeline
+            # Enqueue for pipeline (output consumer will handle response)
             await self.pipeline.input_queue.put({
                 "type": "text",
                 "text": text,
                 "speaker_id": speaker_id,
+                "request_id": request_id,
             })
 
         async def on_speech_start():
             await self.ws_server.send_status("listening")
-            # Check for interruption
+            # Interrupt if AI is currently speaking
             if self.pipeline.interrupt.is_speaking:
                 await self.pipeline.interrupt.interrupt()
 
@@ -217,6 +321,10 @@ class FukurakuSecretary:
 
         await self.microphone.start()
 
+    # ----------------------------------------------------------------
+    # Reminder Checker
+    # ----------------------------------------------------------------
+
     async def _reminder_checker(self):
         """Periodically check for due reminders."""
         while self._running:
@@ -226,13 +334,17 @@ class FukurakuSecretary:
                     text = f"リマインダーです！「{reminder['content']}」"
                     logger.info(f"Reminder triggered: {reminder['content']}")
 
-                    # Announce via TTS and WebSocket
-                    await self.ws_server.send_speech_start(text, "excited")
-                    audio = await self.tts.synthesize(text)
-                    if audio:
-                        volumes = await self.tts.get_audio_for_lip_sync(audio)
-                        await self.ws_server.send_lip_sync(volumes)
-                    await self.ws_server.send_speech_end()
+                    # Inject as a pipeline response
+                    from src.core.llm_router import LLMResponse
+                    await self.pipeline.output_queue.put({
+                        "type": "response",
+                        "request_id": f"reminder-{reminder['id']}",
+                        "response": LLMResponse(
+                            text=text,
+                            emotion="excited",
+                            model="system",
+                        ),
+                    })
 
                     # Mark as completed
                     await self.pipeline.memory.long_term.complete_reminder(reminder["id"])
@@ -279,6 +391,13 @@ def main():
     # Load environment
     load_env()
     setup_logger()
+
+    # Validate configs on startup
+    valid, config_errors = validate_configs()
+    if not valid:
+        for err in config_errors:
+            print(f"  Config warning: {err}")
+        # Continue anyway - validation is advisory, not blocking
 
     if args.test_llm:
         asyncio.run(test_llm())

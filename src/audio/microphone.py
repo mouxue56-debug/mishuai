@@ -1,7 +1,11 @@
 """Microphone input with VAD (Voice Activity Detection).
 
-Captures audio from the microphone, uses WebRTC VAD to detect speech,
-and sends complete utterances to the pipeline for processing.
+Captures audio from the microphone, uses WebRTC VAD or Silero VAD to detect
+speech, and sends complete utterances to the pipeline for processing.
+
+Supports two VAD engines:
+- webrtc: Lightweight, low-latency, good for most use cases
+- silero: ML-based, more accurate, better for noisy environments
 """
 
 import asyncio
@@ -20,8 +24,8 @@ logger = get_logger("microphone")
 class MicrophoneInput:
     """Handles microphone capture with Voice Activity Detection.
 
-    Uses PyAudio for capture and WebRTC VAD for speech detection.
-    Sends completed utterances to a callback for ASR processing.
+    Uses PyAudio for capture and either WebRTC VAD or Silero VAD for
+    speech detection. Sends completed utterances to a callback for ASR.
     """
 
     def __init__(self):
@@ -35,12 +39,16 @@ class MicrophoneInput:
         self.chunk_size = input_config.get("chunk_size", 1024)
         self.device_index = input_config.get("device_index")
 
+        self.vad_engine = vad_config.get("engine", "webrtc")  # "webrtc" | "silero"
         self.vad_mode = vad_config.get("mode", 3)
         self.frame_duration_ms = vad_config.get("frame_duration_ms", 30)
         self.silence_threshold_ms = vad_config.get("silence_threshold_ms", 800)
+        self.silero_threshold = vad_config.get("silero_threshold", 0.5)
 
         self._stream = None
         self._audio = None
+        self._vad = None
+        self._silero_model = None
         self._running = False
         self._on_utterance: Optional[Callable] = None
         self._on_speech_start: Optional[Callable] = None
@@ -58,17 +66,80 @@ class MicrophoneInput:
         """Register callback for when speech ends."""
         self._on_speech_end = callback
 
+    def _init_vad(self):
+        """Initialize the selected VAD engine."""
+        if self.vad_engine == "silero":
+            return self._init_silero_vad()
+        return self._init_webrtc_vad()
+
+    def _init_webrtc_vad(self):
+        """Initialize WebRTC VAD."""
+        try:
+            import webrtcvad
+        except ImportError:
+            logger.error("webrtcvad not installed. Run: pip install webrtcvad")
+            return False
+        self._vad = webrtcvad.Vad(self.vad_mode)
+        logger.info(f"Using WebRTC VAD (mode={self.vad_mode})")
+        return True
+
+    def _init_silero_vad(self):
+        """Initialize Silero VAD (torch-based, more accurate)."""
+        try:
+            import torch
+        except ImportError:
+            logger.warning("torch not installed for Silero VAD, falling back to WebRTC")
+            return self._init_webrtc_vad()
+
+        try:
+            model, utils = torch.hub.load(
+                repo_or_dir="snakers4/silero-vad",
+                model="silero_vad",
+                force_reload=False,
+                trust_repo=True,
+            )
+            self._silero_model = model
+            logger.info(f"Using Silero VAD (threshold={self.silero_threshold})")
+            return True
+        except Exception as e:
+            logger.warning(f"Silero VAD init failed: {e}, falling back to WebRTC")
+            return self._init_webrtc_vad()
+
+    def _is_speech(self, frame: bytes) -> bool:
+        """Check if an audio frame contains speech using the active VAD engine."""
+        if self._silero_model is not None:
+            return self._silero_is_speech(frame)
+        if self._vad is not None:
+            try:
+                return self._vad.is_speech(frame, self.sample_rate)
+            except Exception:
+                return False
+        return False
+
+    def _silero_is_speech(self, frame: bytes) -> bool:
+        """Check speech using Silero VAD."""
+        try:
+            import torch
+            audio = np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768.0
+            tensor = torch.from_numpy(audio)
+            confidence = self._silero_model(tensor, self.sample_rate).item()
+            return confidence >= self.silero_threshold
+        except Exception:
+            return False
+
     async def start(self):
         """Start capturing audio from the microphone."""
         try:
             import pyaudio
-            import webrtcvad
         except ImportError as e:
-            logger.error(f"Missing dependency: {e}. Run: pip install pyaudio webrtcvad")
+            logger.error(f"Missing dependency: {e}. Run: pip install pyaudio")
             return
 
         self._audio = pyaudio.PyAudio()
-        self._vad = webrtcvad.Vad(self.vad_mode)
+
+        if not self._init_vad():
+            logger.error("No VAD engine available, cannot start microphone")
+            return
 
         # Calculate frame size for VAD
         self.frame_size = int(self.sample_rate * self.frame_duration_ms / 1000)
@@ -109,7 +180,7 @@ class MicrophoneInput:
                 )
 
                 # Check VAD
-                is_speech = self._vad.is_speech(frame, self.sample_rate)
+                is_speech = self._is_speech(frame)
 
                 if is_speech:
                     if not is_speaking:

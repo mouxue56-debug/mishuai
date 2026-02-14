@@ -270,41 +270,99 @@ class LLMRouter:
         return self._parse_response(text, model_config.get("model", "gemini"))
 
     def _parse_response(self, raw_text: str, model: str) -> LLMResponse:
-        """Parse LLM response, extracting emotion and tool calls from JSON."""
-        # Try to parse as JSON first
-        try:
-            # Handle markdown code blocks
-            clean = raw_text.strip()
-            if clean.startswith("```json"):
-                clean = clean[7:]
-            if clean.startswith("```"):
-                clean = clean[3:]
-            if clean.endswith("```"):
-                clean = clean[:-3]
-            clean = clean.strip()
+        """Parse LLM response, extracting emotion and tool calls from JSON.
 
+        Handles multiple formats robustly:
+        - Pure JSON: {"text": "...", "emotion": "..."}
+        - JSON in code blocks: ```json ... ```
+        - JSON embedded in text: Some preamble {"text": "..."} etc
+        - Inline emotion tags: [EMOTION:happy] text here
+        - tool_call (singular) → normalized to tool_calls (array)
+        - Plain text fallback
+        """
+        if not raw_text:
+            return LLMResponse(text="", model=model)
+
+        # Strategy 1: Try to parse clean JSON (with code block stripping)
+        data = self._try_parse_json(raw_text)
+        if data:
+            return self._build_response_from_dict(data, raw_text, model)
+
+        # Strategy 2: Try to extract JSON from within text
+        data = self._try_extract_embedded_json(raw_text)
+        if data:
+            return self._build_response_from_dict(data, raw_text, model)
+
+        # Strategy 3: Check for [EMOTION:tag] inline format
+        import re
+        emotion_match = re.search(r'\[EMOTION[：:](\w+)\]', raw_text)
+        if emotion_match:
+            emotion = emotion_match.group(1)
+            clean_text = re.sub(r'\[EMOTION[：:]\w+\]\s*', '', raw_text).strip()
+            return LLMResponse(text=clean_text, emotion=emotion, model=model)
+
+        # Strategy 4: Plain text fallback
+        return LLMResponse(text=raw_text.strip(), model=model)
+
+    def _try_parse_json(self, text: str) -> dict | None:
+        """Try to parse text as JSON, stripping code blocks."""
+        clean = text.strip()
+        # Strip markdown code blocks
+        if clean.startswith("```json"):
+            clean = clean[7:]
+        elif clean.startswith("```"):
+            clean = clean[3:]
+        if clean.endswith("```"):
+            clean = clean[:-3]
+        clean = clean.strip()
+        try:
             data = json.loads(clean)
-            return LLMResponse(
-                text=data.get("text", raw_text),
-                emotion=data.get("emotion", "neutral"),
-                tool_calls=data.get("tool_calls", []),
-                model=model,
-            )
-        except (json.JSONDecodeError, KeyError):
-            # If not valid JSON, try to extract JSON from the text
-            try:
-                start = raw_text.index("{")
-                end = raw_text.rindex("}") + 1
-                data = json.loads(raw_text[start:end])
-                return LLMResponse(
-                    text=data.get("text", raw_text),
-                    emotion=data.get("emotion", "neutral"),
-                    tool_calls=data.get("tool_calls", []),
-                    model=model,
-                )
-            except (ValueError, json.JSONDecodeError):
-                # Plain text response
-                return LLMResponse(text=raw_text, model=model)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return None
+
+    def _try_extract_embedded_json(self, text: str) -> dict | None:
+        """Try to extract a JSON object from within text."""
+        # Find the outermost { ... } pair
+        depth = 0
+        start = -1
+        for i, ch in enumerate(text):
+            if ch == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    try:
+                        data = json.loads(text[start:i + 1])
+                        if isinstance(data, dict) and "text" in data:
+                            return data
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    start = -1
+        return None
+
+    def _build_response_from_dict(self, data: dict, raw_text: str, model: str) -> LLMResponse:
+        """Build LLMResponse from a parsed JSON dict, with tolerance for variants."""
+        text = data.get("text", raw_text)
+        emotion = data.get("emotion", "neutral")
+
+        # Normalize tool_call (singular) to tool_calls (array)
+        tool_calls = data.get("tool_calls", [])
+        if not tool_calls:
+            single_call = data.get("tool_call")
+            if single_call:
+                tool_calls = [single_call] if isinstance(single_call, dict) else single_call
+
+        return LLMResponse(
+            text=text,
+            emotion=emotion,
+            tool_calls=tool_calls,
+            model=model,
+        )
 
     async def chat(
         self,
