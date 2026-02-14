@@ -1,0 +1,155 @@
+# ============================================
+# Fukuraku AI Secretary - Main Configuration
+# ============================================
+
+# --- Application ---
+app:
+  name: "Fukuraku AI Secretary"
+  version: "0.1.0"
+  language: "ja"  # Primary: Japanese
+  debug: false
+
+# --- LLM Models (Multi-model routing) ---
+llm:
+  # Main conversation (personality matters)
+  conversation:
+    primary:
+      provider: "anthropic"
+      model: "claude-sonnet-4-5-20250929"
+      max_tokens: 1024
+      temperature: 0.8
+    fallback:
+      provider: "google"
+      model: "gemini-2.5-flash"
+      max_tokens: 1024
+      temperature: 0.8
+    budget:
+      provider: "openai"
+      model: "gpt-4o-mini"
+      max_tokens: 1024
+      temperature: 0.8
+
+  # Tool execution (accuracy matters)
+  tool_use:
+    primary:
+      provider: "anthropic"
+      model: "claude-sonnet-4-5-20250929"
+      max_tokens: 512
+      temperature: 0.3
+    fallback:
+      provider: "openai"
+      model: "gpt-4o-mini"
+      max_tokens: 512
+      temperature: 0.3
+
+  # Summarization / memory (batch, cost-sensitive)
+  summarization:
+    primary:
+      provider: "google"
+      model: "gemini-2.5-flash"
+      max_tokens: 2048
+      temperature: 0.5
+
+  # Current active mode: "quality" | "balanced" | "budget"
+  active_mode: "balanced"
+
+# --- ASR (Speech Recognition) ---
+asr:
+  engine: "sherpa_onnx"  # "sherpa_onnx" | "faster_whisper" | "google"
+  language: "ja"
+  sherpa_onnx:
+    model_path: "models/asr/"
+    sample_rate: 16000
+
+# --- TTS (Text-to-Speech) ---
+tts:
+  # Japanese TTS
+  japanese:
+    engine: "voicevox"  # "voicevox" | "edge_tts"
+    voicevox:
+      host: "http://127.0.0.1:50021"
+      speaker_id: 3  # ずんだもん (can change to preferred voice)
+      speed_scale: 1.1
+      pitch_scale: 0.0
+      intonation_scale: 1.2
+    edge_tts:
+      voice: "ja-JP-NanamiNeural"
+      rate: "+10%"
+
+  # Chinese TTS
+  chinese:
+    engine: "edge_tts"  # "cosyvoice" | "edge_tts"
+    cosyvoice:
+      model_path: "models/cosyvoice/"
+    edge_tts:
+      voice: "zh-CN-XiaoxiaoNeural"
+      rate: "+5%"
+
+  # Active language for TTS output
+  active_language: "japanese"
+
+# --- Audio ---
+audio:
+  input:
+    device_index: null  # null = default mic
+    sample_rate: 16000
+    channels: 1
+    chunk_size: 1024
+  output:
+    device_index: null  # null = default speaker
+    sample_rate: 24000
+  vad:
+    mode: 3  # WebRTC VAD aggressiveness (0-3)
+    frame_duration_ms: 30
+    silence_threshold_ms: 800  # Silence duration to end utterance
+  wake_word:
+    enabled: true
+    engine: "sherpa_onnx"  # "sherpa_onnx" | "custom"
+    keyword: "ミケちゃん"
+    sensitivity: 0.5
+
+# --- Speaker Recognition ---
+speaker:
+  enabled: true
+  engine: "3d_speaker"
+  model_path: "models/speaker/"
+  similarity_threshold: 0.68
+  profiles_path: "config/speaker_profiles.yaml"
+
+# --- Memory ---
+memory:
+  database_path: "data/memory.db"
+  short_term:
+    max_turns: 10
+  mid_term:
+    summary_interval_hours: 4
+    daily_summary_time: "23:00"
+  long_term:
+    max_entries: 10000
+
+# --- WebSocket (for Live2D frontend) ---
+websocket:
+  host: "0.0.0.0"
+  port: 8765
+
+# --- MCP Tools ---
+mcp:
+  enabled_tools:
+    - "search_customers"
+    - "add_memo"
+    - "set_reminder"
+    - "draft_line_message"
+    - "cattery_knowledge"
+    - "check_schedule"
+    - "generate_sns_caption"
+
+# --- Notion ---
+notion:
+  customer_database_id: ""  # Fill from .env
+
+# --- Logging ---
+logging:
+  level: "INFO"  # DEBUG | INFO | WARNING | ERROR
+  file: "logs/secretary.log"
+  rotation: "10 MB"
+  retention: "7 days"

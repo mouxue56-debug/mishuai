@@ -1,0 +1,13 @@
+[project]
+name = "fukuraku-ai-secretary"
+version = "0.1.0"
+description = "AI Secretary for Fukuraku Cattery & Jikei Hospital"
+requires-python = ">=3.10"
+readme = "README.md"
+
+[project.scripts]
+fukuraku = "src.main:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

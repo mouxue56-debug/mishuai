@@ -1,0 +1,27 @@
+# ============================================
+# Speaker Profiles - Voice Print Registry
+# ============================================
+# To register a new speaker:
+#   1. Run: python -m src.audio.speaker_id --register
+#   2. Speak 3 sentences when prompted
+#   3. The embedding will be saved here automatically
+
+speakers:
+  - id: "will"
+    name: "ウィルさん"
+    role: "boss"
+    embedding_file: "data/speaker_embeddings/will.npy"
+    registered: false  # Set to true after voice registration
+
+  - id: "staff_a"
+    name: "スタッフA"
+    role: "staff"
+    embedding_file: "data/speaker_embeddings/staff_a.npy"
+    registered: false
+
+# Template for adding new speakers:
+# - id: "unique_id"
+#   name: "Display Name"
+#   role: "boss" | "staff" | "visitor"
+#   embedding_file: "data/speaker_embeddings/{id}.npy"
+#   registered: false

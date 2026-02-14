@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment & secrets
+.env
+.env.local
+.env.production
+config/secrets.yaml
+*.key
+
+# Data
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Live2D models (large binary files)
+frontend/models/*.moc3
+frontend/models/*.model3.json
+frontend/models/*/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Audio cache
+audio_cache/
+*.wav
+*.mp3
+*.opus
+
+# VOICEVOX
+voicevox_core/
