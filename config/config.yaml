@@ -5,7 +5,7 @@
 # --- Application ---
 app:
   name: "Fukuraku AI Secretary"
-  version: "0.2.0"
+  version: "0.3.0"
   language: "ja"  # Primary: Japanese
   debug: false
 
@@ -113,10 +113,33 @@ audio:
 # --- Speaker Recognition ---
 speaker:
   enabled: true
-  engine: "3d_speaker"
-  model_path: "models/speaker/"
+  engine: "resemblyzer"  # "resemblyzer" (lightweight) | "3d_speaker" (accurate)
   similarity_threshold: 0.68
+  sample_rate: 16000
   profiles_path: "config/speaker_profiles.yaml"
+
+# --- Vision (Camera → Gemini Flash) ---
+vision:
+  enabled: false  # Set true when camera is connected
+  camera_index: 0
+  capture_interval_sec: 10  # Seconds between captures
+  model: "gemini-2.0-flash"
+  resolution: [640, 480]
+  jpeg_quality: 70
+  prompt: >
+    この画像は猫カフェ/キャッテリーの受付カメラです。
+    簡潔に(1-2文で)シーンを説明してください。
+    人が写っている場合は「[PERSON]」タグを先頭に付けてください。
+    猫が写っている場合は「[CAT]」タグを付けてください。
+    特に変化がなく静かなシーンなら「[QUIET]」とだけ返してください。
+
+# --- Proactive Scheduler ---
+proactive:
+  enabled: true
+  idle_timeout_min: 15       # Minutes before idle chatter
+  greeting_hours: [9, 13]    # Hours to send time-based greetings
+  check_interval_sec: 60     # How often to check triggers
+  cooldown_sec: 300          # Minimum seconds between proactive messages
 
 # --- Memory ---
 memory:

@@ -2,17 +2,18 @@
 
 Starts all subsystems and runs the main event loop.
 
-Key architectural fixes (v0.2):
+Key architectural fixes (v0.3):
+- Vision input: Camera → Gemini Flash for scene understanding
+- Proactive scheduler: Time/idle/vision-triggered speech
+- Speaker ID: Real voiceprint extraction (resemblyzer / 3D-Speaker)
 - Unified output consumer: Both voice and text modes share the same TTS/WS path
 - Audio sent via WebSocket as base64 for frontend playback (OBS-compatible)
-- Proper SPEAKING state in interrupt handler
-- Request ID tracking to prevent race conditions
 
 Usage:
-    # Full system (voice + Live2D frontend)
+    # Full system (voice + vision + Live2D frontend)
     python -m src.main
 
-    # Text-only mode (no microphone, chat via WebSocket frontend)
+    # Text-only mode (no microphone/camera, WebSocket chat only)
     python -m src.main --text-only
 
     # Test LLM connection
@@ -27,12 +28,14 @@ import uuid
 
 from src.core.interrupt_handler import PipelineState
 from src.core.pipeline import DialoguePipeline
+from src.core.proactive_scheduler import ProactiveScheduler
 from src.audio.microphone import MicrophoneInput
 from src.audio.asr import ASREngine
 from src.audio.tts import TTSEngine
 from src.audio.speaker_id import SpeakerIdentifier
 from src.audio.wake_word import WakeWordDetector
 from src.display.websocket_server import WebSocketServer
+from src.vision.camera import VisionInput
 from src.mcp.tools.memo_reminder import set_memory_manager
 from src.utils.config_loader import load_env, get_main_config, validate_configs
 from src.utils.logger import setup_logger, get_logger
@@ -44,15 +47,15 @@ logger = get_logger("main")
 class FukurakuSecretary:
     """Main application class that orchestrates all subsystems.
 
-    Architecture (v0.2):
-        Text/Voice Input → Pipeline (LLM + Tools) → Output Queue
-                                                        ↓
-                                            Unified Output Consumer
-                                            ├── TTS synthesis
-                                            ├── WS: speech_start + emotion
-                                            ├── WS: audio (base64) + lip_sync
-                                            ├── WS: speech_end
-                                            └── State: SPEAKING → IDLE
+    Architecture (v0.3):
+        Text/Voice Input ──→ Pipeline (LLM + Tools) → Output Queue
+        Camera (Vision) ──→ Proactive Scheduler ──────↗     ↓
+        Time/Idle triggers ─────────────────────────↗  Output Consumer
+                                                       ├── TTS synthesis
+                                                       ├── WS: speech_start + emotion
+                                                       ├── WS: audio (base64) + lip_sync
+                                                       ├── WS: speech_end
+                                                       └── State: SPEAKING → IDLE
     """
 
     def __init__(self, text_only: bool = False):
@@ -60,12 +63,16 @@ class FukurakuSecretary:
         self.pipeline = DialoguePipeline()
         self.ws_server = WebSocketServer()
         self.tts = TTSEngine()
+        self.scheduler = ProactiveScheduler()
 
         # Audio components (disabled in text-only mode)
         self.microphone = None
         self.asr = None
         self.speaker_id = None
         self.wake_word = None
+
+        # Vision (enabled independently of text-only mode)
+        self.vision = VisionInput()
 
         if not text_only:
             self.microphone = MicrophoneInput()
@@ -78,7 +85,7 @@ class FukurakuSecretary:
     async def start(self):
         """Initialize and start all subsystems."""
         logger.info("=" * 50)
-        logger.info("  Fukuraku AI Secretary v0.2.0")
+        logger.info("  Fukuraku AI Secretary v0.3.0")
         logger.info("  福楽キャッテリー AI秘書 「ミケ」")
         logger.info("=" * 50)
 
@@ -100,6 +107,16 @@ class FukurakuSecretary:
             if self.wake_word:
                 await self.wake_word.initialize()
 
+        # Initialize vision
+        await self.vision.initialize()
+
+        # Set up vision callbacks → scheduler
+        self.vision.on_person_detected(self._on_person_detected)
+        self.vision.on_scene_change(self._on_scene_change)
+
+        # Set up proactive scheduler → pipeline output queue
+        self.scheduler.on_proactive_speak(self._handle_proactive_speak)
+
         # Set up WebSocket server
         self.ws_server.on_text_input(self._handle_text_input)
         self.ws_server.on_command(self._handle_command)
@@ -112,18 +129,24 @@ class FukurakuSecretary:
         self._running = True
         logger.info("System ready! Waiting for input...")
         logger.info(f"Mode: {'Text-only' if self.text_only else 'Full (Voice + Text)'}")
+        logger.info(f"Vision: {'enabled' if self.vision.enabled else 'disabled'}")
+        logger.info(f"Speaker ID: {'enabled' if (self.speaker_id and self.speaker_id.enabled) else 'disabled'}")
         logger.info(f"WebSocket: ws://localhost:{self.ws_server.port}")
         logger.info(f"Frontend: Open frontend/index.html in a browser")
 
         # Run all tasks concurrently
         tasks = [
             self.pipeline.run(),
-            self._output_consumer(),   # Unified output consumer
+            self._output_consumer(),
             self._reminder_checker(),
+            self.scheduler.start(),
         ]
 
         if not self.text_only and self.microphone:
             tasks.append(self._voice_loop())
+
+        if self.vision.enabled:
+            tasks.append(self.vision.start())
 
         await asyncio.gather(*tasks)
 
@@ -135,27 +158,66 @@ class FukurakuSecretary:
         if self.microphone:
             await self.microphone.stop()
 
+        await self.vision.stop()
+        await self.scheduler.stop()
         await self.ws_server.stop()
         await self.pipeline.shutdown()
         logger.info("Goodbye!")
 
     # ----------------------------------------------------------------
-    # Unified Output Consumer
+    # Vision Callbacks
     # ----------------------------------------------------------------
-    # This is the SINGLE place where all assistant responses are:
-    # 1. Sent to the frontend (speech_start, emotion, subtitle)
-    # 2. Synthesized to audio via TTS
-    # 3. Sent to frontend as base64 audio + lip sync data
-    # 4. State managed (SPEAKING → IDLE)
-    # Both text-only and voice modes funnel through here.
+
+    async def _on_person_detected(self, description: str):
+        """Called when the camera detects a person."""
+        logger.info(f"[Vision] Person detected: {description}")
+        # Feed to proactive scheduler for greeting
+        self.scheduler.notify_vision_event(description)
+
+    async def _on_scene_change(self, description: str):
+        """Called when the camera scene changes significantly."""
+        logger.debug(f"[Vision] Scene: {description}")
+
+    # ----------------------------------------------------------------
+    # Proactive Speech Handler
+    # ----------------------------------------------------------------
+
+    async def _handle_proactive_speak(self, context: str, trigger: str):
+        """Handle proactive speech from the scheduler.
+
+        Sends the context through the LLM so the response has personality,
+        rather than using a hardcoded message.
+        """
+        request_id = f"proactive-{trigger}-{str(uuid.uuid4())[:4]}"
+        logger.info(f"[{request_id}] Proactive trigger: {trigger}")
+
+        # Build a prompt for the LLM to generate a natural proactive message
+        if trigger == "vision":
+            prompt = (
+                f"[カメラ入力] 受付カメラで以下が検出されました: {context}\n"
+                "来客に気づいたように自然に声をかけてください。"
+            )
+        elif trigger == "greeting":
+            prompt = f"[時間挨拶] {context}"
+        elif trigger == "idle":
+            prompt = f"[待機中] {context}"
+        else:
+            prompt = context
+
+        # Enqueue as a special "proactive" input
+        await self.pipeline.input_queue.put({
+            "type": "text",
+            "text": prompt,
+            "speaker_id": None,
+            "request_id": request_id,
+        })
+
+    # ----------------------------------------------------------------
+    # Unified Output Consumer
     # ----------------------------------------------------------------
 
     async def _output_consumer(self):
-        """Unified output consumer - handles all assistant responses.
-
-        Continuously reads from the pipeline's output queue and drives:
-        TTS synthesis, WebSocket updates, lip sync, and state management.
-        """
+        """Unified output consumer - handles all assistant responses."""
         while self._running:
             try:
                 result = await asyncio.wait_for(
@@ -173,6 +235,9 @@ class FukurakuSecretary:
 
                 logger.info(f"[{request_id}] Output consumer: delivering response")
 
+                # Notify scheduler that interaction occurred
+                self.scheduler.notify_interaction()
+
                 # 1. Set SPEAKING state
                 self.pipeline.interrupt.set_state(PipelineState.SPEAKING)
                 self.pipeline.interrupt.clear_interrupt()
@@ -186,7 +251,7 @@ class FukurakuSecretary:
                 audio_data = await self.tts.synthesize(response.text)
 
                 if audio_data and not self.pipeline.interrupt.should_stop():
-                    # 4. Extract lip sync data
+                    # 4. Extract lip sync data (legacy, frontend now uses real-time)
                     volumes = await self.tts.get_audio_for_lip_sync(audio_data)
                     await self.ws_server.send_lip_sync(volumes)
 
@@ -195,14 +260,13 @@ class FukurakuSecretary:
                     await self.ws_server.broadcast({
                         "type": "audio",
                         "data": audio_b64,
-                        "format": "wav",  # or "mp3" depending on TTS engine
+                        "format": "mp3",  # Edge TTS outputs MP3
                         "request_id": request_id,
                     })
 
                     # 6. Wait for approximate playback duration
-                    # (Estimate: audio_data size / byte_rate)
-                    # WAV at 24kHz 16-bit mono = 48000 bytes/sec
-                    duration_sec = max(len(audio_data) / 48000, 0.5)
+                    # MP3 is compressed; estimate ~4x compression ratio
+                    duration_sec = max(len(audio_data) / 12000, 0.5)
                     try:
                         interrupted = await self.pipeline.interrupt.wait_for_interrupt(
                             timeout=duration_sec
@@ -230,13 +294,12 @@ class FukurakuSecretary:
     # ----------------------------------------------------------------
 
     async def _handle_text_input(self, text: str):
-        """Handle text input from the WebSocket frontend.
-
-        Simply enqueues the text into the pipeline input queue.
-        The output consumer will handle the response.
-        """
+        """Handle text input from the WebSocket frontend."""
         request_id = str(uuid.uuid4())[:8]
         logger.info(f"[{request_id}] Text input: '{text}'")
+
+        # Notify scheduler (resets idle timer)
+        self.scheduler.notify_interaction()
 
         # Show user's message as subtitle
         await self.ws_server.send_subtitle(text, "user")
@@ -271,17 +334,16 @@ class FukurakuSecretary:
     # ----------------------------------------------------------------
 
     async def _voice_loop(self):
-        """Main voice capture and processing loop.
-
-        Only captures audio and enqueues transcribed text.
-        The output consumer handles the response delivery.
-        """
+        """Main voice capture and processing loop."""
         if not self.microphone or not self.asr:
             return
 
         async def on_utterance(audio_data: bytes):
             """Called when a complete utterance is detected."""
             await self.ws_server.send_status("processing")
+
+            # Notify scheduler (resets idle timer)
+            self.scheduler.notify_interaction()
 
             # Speaker identification
             speaker_id = None
@@ -334,7 +396,6 @@ class FukurakuSecretary:
                     text = f"リマインダーです！「{reminder['content']}」"
                     logger.info(f"Reminder triggered: {reminder['content']}")
 
-                    # Inject as a pipeline response
                     from src.core.llm_router import LLMResponse
                     await self.pipeline.output_queue.put({
                         "type": "response",
@@ -346,13 +407,12 @@ class FukurakuSecretary:
                         ),
                     })
 
-                    # Mark as completed
                     await self.pipeline.memory.long_term.complete_reminder(reminder["id"])
 
             except Exception as e:
                 logger.error(f"Reminder check error: {e}")
 
-            await asyncio.sleep(30)  # Check every 30 seconds
+            await asyncio.sleep(30)
 
 
 async def test_llm():
@@ -397,7 +457,6 @@ def main():
     if not valid:
         for err in config_errors:
             print(f"  Config warning: {err}")
-        # Continue anyway - validation is advisory, not blocking
 
     if args.test_llm:
         asyncio.run(test_llm())
@@ -416,7 +475,6 @@ def main():
         try:
             loop.add_signal_handler(sig, signal_handler)
         except NotImplementedError:
-            # Windows doesn't support add_signal_handler
             pass
 
     try:
