@@ -14,39 +14,39 @@ llm:
   # Main conversation (personality matters)
   conversation:
     primary:
-      provider: "anthropic"
-      model: "claude-sonnet-4-5-20250929"
+      provider: "moonshot"
+      model: "moonshot-v1-8k"
       max_tokens: 1024
       temperature: 0.8
     fallback:
-      provider: "google"
-      model: "gemini-2.5-flash"
+      provider: "moonshot"
+      model: "moonshot-v1-8k"
       max_tokens: 1024
       temperature: 0.8
     budget:
-      provider: "openai"
-      model: "gpt-4o-mini"
+      provider: "moonshot"
+      model: "moonshot-v1-8k"
       max_tokens: 1024
       temperature: 0.8
 
   # Tool execution (accuracy matters)
   tool_use:
     primary:
-      provider: "anthropic"
-      model: "claude-sonnet-4-5-20250929"
+      provider: "moonshot"
+      model: "moonshot-v1-8k"
       max_tokens: 512
       temperature: 0.3
     fallback:
-      provider: "openai"
-      model: "gpt-4o-mini"
+      provider: "moonshot"
+      model: "moonshot-v1-8k"
       max_tokens: 512
       temperature: 0.3
 
   # Summarization / memory (batch, cost-sensitive)
   summarization:
     primary:
-      provider: "google"
-      model: "gemini-2.5-flash"
+      provider: "moonshot"
+      model: "moonshot-v1-8k"
       max_tokens: 2048
       temperature: 0.5
 
@@ -65,7 +65,7 @@ asr:
 tts:
   # Japanese TTS
   japanese:
-    engine: "voicevox"  # "voicevox" | "edge_tts"
+    engine: "edge_tts"  # "voicevox" | "edge_tts"
     voicevox:
       host: "http://127.0.0.1:50021"
       speaker_id: 3  # ずんだもん (can change to preferred voice)
