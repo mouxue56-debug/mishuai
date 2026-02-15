@@ -40,7 +40,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (live2d) live2d.onResize();
     });
 
-    // Track mouse for model eye follow
+    // Track mouse/touch for model eye follow
     document.addEventListener('mousemove', (e) => {
         if (live2d && live2d.isLoaded) {
             live2d.lookAt(
@@ -49,6 +49,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             );
         }
     });
+
+    document.addEventListener('touchmove', (e) => {
+        if (live2d && live2d.isLoaded && e.touches.length > 0) {
+            const touch = e.touches[0];
+            live2d.lookAt(
+                touch.clientX / window.innerWidth,
+                touch.clientY / window.innerHeight
+            );
+        }
+    }, { passive: true });
 
     console.log('[App] Initialized');
 });
@@ -65,6 +75,7 @@ function initAudioContext() {
         }
     };
     document.addEventListener('click', resume, { once: true });
+    document.addEventListener('touchstart', resume, { once: true });
     document.addEventListener('keydown', resume, { once: true });
 }
 
