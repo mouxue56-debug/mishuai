@@ -22,6 +22,7 @@ class LLMProvider(Enum):
     GOOGLE = "google"
     MOONSHOT = "moonshot"
     DEEPSEEK = "deepseek"
+    QIANWEN = "qianwen"
 
 
 class LLMMode(Enum):
@@ -199,6 +200,7 @@ class LLMRouter:
             "openai": "https://api.openai.com/v1",
             "moonshot": "https://api.moonshot.cn/v1",
             "deepseek": "https://api.deepseek.com/v1",
+            "qianwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         }
 
         api_key = get_api_key(provider)

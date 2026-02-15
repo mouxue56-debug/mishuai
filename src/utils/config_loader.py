@@ -103,6 +103,7 @@ def get_api_key(service: str) -> str:
         "google": "GOOGLE_API_KEY",
         "moonshot": "MOONSHOT_API_KEY",
         "deepseek": "DEEPSEEK_API_KEY",
+        "qianwen": "QIANWEN_API_KEY",
         "notion": "NOTION_API_KEY",
         "line": "LINE_CHANNEL_ACCESS_TOKEN",
     }

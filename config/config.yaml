@@ -14,39 +14,39 @@ llm:
   # Main conversation (personality matters)
   conversation:
     primary:
-      provider: "moonshot"
-      model: "moonshot-v1-8k"
+      provider: "qianwen"
+      model: "qwen-plus"
       max_tokens: 1024
       temperature: 0.8
     fallback:
-      provider: "moonshot"
-      model: "moonshot-v1-8k"
+      provider: "qianwen"
+      model: "qwen-plus"
       max_tokens: 1024
       temperature: 0.8
     budget:
-      provider: "moonshot"
-      model: "moonshot-v1-8k"
+      provider: "qianwen"
+      model: "qwen-plus"
       max_tokens: 1024
       temperature: 0.8
 
   # Tool execution (accuracy matters)
   tool_use:
     primary:
-      provider: "moonshot"
-      model: "moonshot-v1-8k"
+      provider: "qianwen"
+      model: "qwen-plus"
       max_tokens: 512
       temperature: 0.3
     fallback:
-      provider: "moonshot"
-      model: "moonshot-v1-8k"
+      provider: "qianwen"
+      model: "qwen-plus"
       max_tokens: 512
       temperature: 0.3
 
   # Summarization / memory (batch, cost-sensitive)
   summarization:
     primary:
-      provider: "moonshot"
-      model: "moonshot-v1-8k"
+      provider: "qianwen"
+      model: "qwen-plus"
       max_tokens: 2048
       temperature: 0.5
 
