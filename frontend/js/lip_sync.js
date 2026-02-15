@@ -48,6 +48,18 @@ class LipSync {
     }
 
     /**
+     * Start lip sync with a connected AnalyserNode (real-time audio).
+     * @param {AnalyserNode} analyser - A Web Audio AnalyserNode connected to audio source.
+     */
+    startWithAnalyser(analyser) {
+        this.stop();
+        this.isActive = true;
+        this._analyser = analyser;
+        this._dataArray = new Uint8Array(analyser.frequencyBinCount);
+        this._animateRealtime();
+    }
+
+    /**
      * Stop lip sync animation.
      */
     stop() {
@@ -56,6 +68,8 @@ class LipSync {
         this.targetVolume = 0;
         this.volumes = [];
         this.currentIndex = 0;
+        this._analyser = null;
+        this._dataArray = null;
 
         if (this._animationId) {
             cancelAnimationFrame(this._animationId);
@@ -105,6 +119,31 @@ class LipSync {
         }
 
         this._animationId = requestAnimationFrame(() => this._animate());
+    }
+
+    _animateRealtime() {
+        if (!this.isActive || !this._analyser) return;
+
+        this._analyser.getByteFrequencyData(this._dataArray);
+
+        // Calculate average volume from frequency data
+        let sum = 0;
+        for (let i = 0; i < this._dataArray.length; i++) {
+            sum += this._dataArray[i];
+        }
+        const average = sum / this._dataArray.length;
+        this.targetVolume = Math.min(average / 128, 1.0);
+
+        // Smooth the volume change
+        this.currentVolume += (this.targetVolume - this.currentVolume) * (1 - this.smoothing);
+
+        const mouthValue = this.currentVolume > 0.05 ? this.currentVolume : 0;
+
+        if (this.onVolumeUpdate) {
+            this.onVolumeUpdate(mouthValue);
+        }
+
+        this._animationId = requestAnimationFrame(() => this._animateRealtime());
     }
 
     _setupAudioAnalysis(audioContext) {

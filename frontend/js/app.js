@@ -88,13 +88,33 @@ async function playAudioB64(b64data, format) {
             bytes[i] = binaryStr.charCodeAt(i);
         }
 
-        // Decode audio
+        // Decode audio (works for both WAV and MP3)
         const audioBuffer = await audioContext.decodeAudioData(bytes.buffer);
 
-        // Play
+        // Create source
         const source = audioContext.createBufferSource();
         source.buffer = audioBuffer;
-        source.connect(audioContext.destination);
+
+        // Create analyser for real-time lip sync
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+
+        // Route: source → analyser → speakers
+        source.connect(analyser);
+        analyser.connect(audioContext.destination);
+
+        // Drive lip sync from real-time audio analysis
+        if (live2d) {
+            live2d.lipSync.startWithAnalyser(analyser);
+        }
+
+        // Stop lip sync when audio finishes
+        source.onended = () => {
+            if (live2d) {
+                live2d.lipSync.stop();
+            }
+        };
+
         source.start(0);
 
         console.log(`[Audio] Playing ${format} audio (${(audioBuffer.duration).toFixed(1)}s)`);
@@ -136,6 +156,13 @@ function setupWSHandlers() {
         updateStatus('speaking', '発話中');
         showSubtitle(data.text);
         addChatMessage(data.text, 'assistant');
+
+        // Apply emotion from speech data
+        if (data.emotion && live2d && live2d.isLoaded) {
+            live2d.setEmotion(data.emotion);
+            const emoji = live2d.emotionMapper.getEmoji(data.emotion);
+            document.getElementById('emotion-badge').textContent = `${emoji} ${data.emotion}`;
+        }
     });
 
     wsClient.on('speech_end', () => {
