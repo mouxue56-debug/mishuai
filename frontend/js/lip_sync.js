@@ -1,28 +1,52 @@
 /**
- * Lip Sync Controller
+ * Lip Sync Controller (v2 - Frequency-based)
  *
- * Animates the Live2D model's mouth based on audio volume data
- * received from the backend or from real-time audio analysis.
+ * Analyzes audio frequency bands to drive multiple mouth parameters:
+ * - ParamMouthOpenY: How wide the mouth opens (driven by overall volume)
+ * - ParamMouthForm:  Mouth shape (-1 = "o/a", +1 = "i/e" smile)
+ *
+ * References DenchiSoft/Live2DFrequencyLipSync approach.
  */
 
 class LipSync {
     constructor() {
         this.isActive = false;
-        this.volumes = [];         // Pre-computed volume data from backend
+        this.volumes = [];
         this.currentIndex = 0;
-        this.frameInterval = 23;   // ms per frame (~1024 samples at 44100Hz)
-        this.smoothing = 0.3;      // Smoothing factor (0 = no smooth, 1 = max smooth)
-        this.currentVolume = 0;
-        this.targetVolume = 0;
+        this.frameInterval = 23;
+        this.smoothing = 0.35;
         this._animationId = null;
         this._startTime = 0;
+        this._analyser = null;
+        this._dataArray = null;
 
-        // Callback to update Live2D mouth parameter
+        // Multi-parameter state (frequency-based)
+        this.currentMouthOpen = 0;
+        this.targetMouthOpen = 0;
+        this.currentMouthForm = 0;
+        this.targetMouthForm = 0;
+
+        // Callback: receives { mouthOpen, mouthForm } object
+        this.onMouthUpdate = null;
+
+        // Legacy single-value callback (kept for backward compat)
         this.onVolumeUpdate = null;
     }
 
     /**
-     * Start lip sync with pre-computed volume data.
+     * Start lip sync with a connected AnalyserNode (real-time, frequency-based).
+     * @param {AnalyserNode} analyser - A Web Audio AnalyserNode connected to audio source.
+     */
+    startWithAnalyser(analyser) {
+        this.stop();
+        this.isActive = true;
+        this._analyser = analyser;
+        this._dataArray = new Uint8Array(analyser.frequencyBinCount);
+        this._animateFrequency();
+    }
+
+    /**
+     * Start lip sync with pre-computed volume data (legacy/fallback).
      * @param {number[]} volumes - Array of volume levels (0.0-1.0).
      */
     startWithData(volumes) {
@@ -31,32 +55,7 @@ class LipSync {
         this.currentIndex = 0;
         this.isActive = true;
         this._startTime = performance.now();
-        this._animate();
-    }
-
-    /**
-     * Start lip sync with real-time audio analysis.
-     * @param {MediaStream|AudioContext} audioSource - Audio source for analysis.
-     */
-    startWithAudio(audioSource) {
-        this.stop();
-        this.isActive = true;
-
-        if (audioSource instanceof AudioContext) {
-            this._setupAudioAnalysis(audioSource);
-        }
-    }
-
-    /**
-     * Start lip sync with a connected AnalyserNode (real-time audio).
-     * @param {AnalyserNode} analyser - A Web Audio AnalyserNode connected to audio source.
-     */
-    startWithAnalyser(analyser) {
-        this.stop();
-        this.isActive = true;
-        this._analyser = analyser;
-        this._dataArray = new Uint8Array(analyser.frequencyBinCount);
-        this._animateRealtime();
+        this._animateLegacy();
     }
 
     /**
@@ -64,8 +63,10 @@ class LipSync {
      */
     stop() {
         this.isActive = false;
-        this.currentVolume = 0;
-        this.targetVolume = 0;
+        this.currentMouthOpen = 0;
+        this.targetMouthOpen = 0;
+        this.currentMouthForm = 0;
+        this.targetMouthForm = 0;
         this.volumes = [];
         this.currentIndex = 0;
         this._analyser = null;
@@ -77,105 +78,102 @@ class LipSync {
         }
 
         // Reset mouth to closed
-        if (this.onVolumeUpdate) {
-            this.onVolumeUpdate(0);
+        this._notifyUpdate(0, 0);
+    }
+
+    // --- Private: Frequency-based analysis ---
+
+    _animateFrequency() {
+        if (!this.isActive || !this._analyser) return;
+
+        this._analyser.getByteFrequencyData(this._dataArray);
+        const binCount = this._dataArray.length; // 128 bins for fftSize=256
+
+        // Split into 3 frequency bands
+        // At 44100Hz, each bin ~= 172Hz. At 48000Hz, ~= 187Hz.
+        // Low:  bins 0-3   (0~690Hz)   - fundamental, "a/o" vowels
+        // Mid:  bins 3-12  (690~2070Hz) - formants, "e/i" vowels
+        // High: bins 12-40 (2070~6900Hz)- consonants, sibilants
+        const lowEnd = Math.min(4, binCount);
+        const midEnd = Math.min(13, binCount);
+        const highEnd = Math.min(41, binCount);
+
+        let lowSum = 0, midSum = 0, highSum = 0;
+        for (let i = 0; i < lowEnd; i++) lowSum += this._dataArray[i];
+        for (let i = lowEnd; i < midEnd; i++) midSum += this._dataArray[i];
+        for (let i = midEnd; i < highEnd; i++) highSum += this._dataArray[i];
+
+        const lowAvg = lowSum / lowEnd;
+        const midAvg = midSum / (midEnd - lowEnd);
+        const highAvg = highSum / (highEnd - midEnd);
+
+        // Mouth open: driven by overall energy (weighted toward low+mid)
+        const overallEnergy = (lowAvg * 0.5 + midAvg * 0.35 + highAvg * 0.15);
+        this.targetMouthOpen = Math.min(overallEnergy / 100, 1.0);
+
+        // Mouth form: frequency balance determines shape
+        // More low energy → "a/o" (negative form, round mouth)
+        // More mid/high energy → "i/e" (positive form, smile-like)
+        const totalEnergy = lowAvg + midAvg + highAvg;
+        if (totalEnergy > 15) {
+            const balance = (midAvg + highAvg * 0.5) / totalEnergy;
+            // balance ~0.33 = even → 0, high balance → positive, low → negative
+            this.targetMouthForm = (balance - 0.35) * 3.0;
+            this.targetMouthForm = Math.max(-1.0, Math.min(1.0, this.targetMouthForm));
+        } else {
+            this.targetMouthForm = 0;
+            this.targetMouthOpen = 0;
         }
+
+        // Smooth transitions
+        const openSmooth = 1 - this.smoothing;
+        const formSmooth = 1 - this.smoothing * 1.5; // Form changes slower
+
+        this.currentMouthOpen += (this.targetMouthOpen - this.currentMouthOpen) * openSmooth;
+        this.currentMouthForm += (this.targetMouthForm - this.currentMouthForm) * formSmooth;
+
+        // Apply threshold
+        const mouthOpen = this.currentMouthOpen > 0.04 ? this.currentMouthOpen : 0;
+        const mouthForm = mouthOpen > 0 ? this.currentMouthForm : 0;
+
+        this._notifyUpdate(mouthOpen, mouthForm);
+
+        this._animationId = requestAnimationFrame(() => this._animateFrequency());
     }
 
-    /**
-     * Get the current mouth open value for Live2D.
-     * @returns {number} Mouth open value (0.0-1.0).
-     */
-    getMouthValue() {
-        return this.currentVolume;
-    }
+    // --- Private: Legacy volume-only animation ---
 
-    // --- Private ---
-
-    _animate() {
+    _animateLegacy() {
         if (!this.isActive) return;
 
         const elapsed = performance.now() - this._startTime;
         const frameIndex = Math.floor(elapsed / this.frameInterval);
 
         if (this.volumes.length > 0) {
-            // Pre-computed volume data mode
             if (frameIndex >= this.volumes.length) {
                 this.stop();
                 return;
             }
-            this.targetVolume = this.volumes[frameIndex] || 0;
+            this.targetMouthOpen = this.volumes[frameIndex] || 0;
         }
 
-        // Smooth the volume change
-        this.currentVolume += (this.targetVolume - this.currentVolume) * (1 - this.smoothing);
+        this.currentMouthOpen += (this.targetMouthOpen - this.currentMouthOpen) * (1 - this.smoothing);
+        const mouthOpen = this.currentMouthOpen > 0.05 ? this.currentMouthOpen : 0;
 
-        // Apply minimum threshold (don't open mouth for very quiet sounds)
-        const mouthValue = this.currentVolume > 0.05 ? this.currentVolume : 0;
+        this._notifyUpdate(mouthOpen, 0);
 
-        // Notify callback
-        if (this.onVolumeUpdate) {
-            this.onVolumeUpdate(mouthValue);
-        }
-
-        this._animationId = requestAnimationFrame(() => this._animate());
+        this._animationId = requestAnimationFrame(() => this._animateLegacy());
     }
 
-    _animateRealtime() {
-        if (!this.isActive || !this._analyser) return;
+    // --- Notification ---
 
-        this._analyser.getByteFrequencyData(this._dataArray);
-
-        // Calculate average volume from frequency data
-        let sum = 0;
-        for (let i = 0; i < this._dataArray.length; i++) {
-            sum += this._dataArray[i];
+    _notifyUpdate(mouthOpen, mouthForm) {
+        if (this.onMouthUpdate) {
+            this.onMouthUpdate({ mouthOpen, mouthForm });
         }
-        const average = sum / this._dataArray.length;
-        this.targetVolume = Math.min(average / 128, 1.0);
-
-        // Smooth the volume change
-        this.currentVolume += (this.targetVolume - this.currentVolume) * (1 - this.smoothing);
-
-        const mouthValue = this.currentVolume > 0.05 ? this.currentVolume : 0;
-
+        // Legacy callback compatibility
         if (this.onVolumeUpdate) {
-            this.onVolumeUpdate(mouthValue);
+            this.onVolumeUpdate(mouthOpen);
         }
-
-        this._animationId = requestAnimationFrame(() => this._animateRealtime());
-    }
-
-    _setupAudioAnalysis(audioContext) {
-        // For real-time audio analysis (e.g., when playing TTS audio in browser)
-        const analyser = audioContext.createAnalyser();
-        analyser.fftSize = 256;
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-        const analyze = () => {
-            if (!this.isActive) return;
-
-            analyser.getByteFrequencyData(dataArray);
-
-            // Calculate average volume from frequency data
-            let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) {
-                sum += dataArray[i];
-            }
-            const average = sum / dataArray.length;
-            this.targetVolume = Math.min(average / 128, 1.0);
-
-            // Smooth
-            this.currentVolume += (this.targetVolume - this.currentVolume) * (1 - this.smoothing);
-
-            if (this.onVolumeUpdate) {
-                this.onVolumeUpdate(this.currentVolume > 0.05 ? this.currentVolume : 0);
-            }
-
-            this._animationId = requestAnimationFrame(analyze);
-        };
-
-        analyze();
-        return analyser;
     }
 }

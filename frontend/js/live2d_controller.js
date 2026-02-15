@@ -1,10 +1,14 @@
 /**
- * Live2D Controller
+ * Live2D Controller (v2)
  *
  * Manages the Live2D model rendering, expression changes,
  * and parameter updates using pixi-live2d-display.
  *
- * References N.E.K.O's Live2D frontend approach.
+ * v2 upgrades:
+ * - Frequency-based lip sync (multi-parameter mouth control)
+ * - Natural eye blinking with random intervals
+ * - Expression transitions coexist with idle animation
+ * - References N.E.K.O and Open-LLM-VTuber approaches
  */
 
 class Live2DController {
@@ -17,10 +21,17 @@ class Live2DController {
 
         // Transition animation state
         this._transitionAnimation = null;
+        this._activeEmotionParams = {};  // Currently applied emotion params
 
         // Idle animation
         this._idleTimer = null;
         this._lookAtTarget = { x: 0, y: 0 };
+
+        // Eye blink state
+        this._blinkTimer = null;
+        this._blinkPhase = 'open';  // 'open' | 'closing' | 'opening'
+        this._blinkProgress = 0;
+        this._isSpeaking = false;
     }
 
     /**
@@ -39,15 +50,16 @@ class Live2DController {
             view: canvas,
             autoStart: true,
             resizeTo: window,
-            backgroundAlpha: 0,  // Transparent for OBS
+            backgroundAlpha: 0,
         });
 
-        // Set up lip sync callback
-        this.lipSync.onVolumeUpdate = (value) => {
-            this._setMouthOpen(value);
+        // Set up lip sync callbacks (both new and legacy)
+        this.lipSync.onMouthUpdate = (params) => {
+            this._setMouthParams(params);
         };
+        this.lipSync.onVolumeUpdate = null; // Use onMouthUpdate instead
 
-        console.log('[Live2D] Renderer initialized');
+        console.log('[Live2D] Renderer initialized (v2)');
     }
 
     /**
@@ -61,15 +73,12 @@ class Live2DController {
         }
 
         try {
-            // Remove existing model
             if (this.model) {
                 this.app.stage.removeChild(this.model);
             }
 
-            // Load model using pixi-live2d-display
             this.model = await PIXI.live2d.Live2DModel.from(modelPath);
 
-            // Scale and position
             const scale = Math.min(
                 this.app.screen.width / this.model.width,
                 this.app.screen.height / this.model.height
@@ -80,18 +89,16 @@ class Live2DController {
             this.model.y = this.app.screen.height;
             this.model.anchor.set(0.5, 1.0);
 
-            // Make interactive (click reactions)
             this.model.interactive = true;
             this.model.on('pointertap', () => this._onModelTap());
 
-            // Add to stage
             this.app.stage.addChild(this.model);
 
             this.isLoaded = true;
             console.log('[Live2D] Model loaded:', modelPath);
 
-            // Start idle animation
             this._startIdleAnimation();
+            this._startBlinking();
 
         } catch (error) {
             console.error('[Live2D] Model load error:', error);
@@ -112,7 +119,6 @@ class Live2DController {
         const transition = this.emotionMapper.setEmotion(emotion);
         this._animateTransition(transition);
 
-        // Also try to play a motion
         try {
             const motionGroup = transition.data.motionGroup;
             this.model.motion(motionGroup);
@@ -122,10 +128,18 @@ class Live2DController {
     }
 
     /**
+     * Notify controller that speech is starting (affects blink behavior).
+     */
+    setSpeaking(speaking) {
+        this._isSpeaking = speaking;
+    }
+
+    /**
      * Start lip sync animation.
      * @param {number[]} volumes - Volume data from backend.
      */
     startLipSync(volumes) {
+        this._isSpeaking = true;
         this.lipSync.startWithData(volumes);
     }
 
@@ -133,51 +147,55 @@ class Live2DController {
      * Stop lip sync animation.
      */
     stopLipSync() {
+        this._isSpeaking = false;
         this.lipSync.stop();
     }
 
     /**
      * Make the model look at a screen position.
-     * @param {number} x - Screen X (0.0 = left, 1.0 = right).
-     * @param {number} y - Screen Y (0.0 = top, 1.0 = bottom).
      */
     lookAt(x, y) {
         if (!this.model) return;
 
-        // Convert to Live2D parameter range (-1 to 1)
         const paramX = (x - 0.5) * 2;
         const paramY = -(y - 0.5) * 2;
 
         this._lookAtTarget = { x: paramX, y: paramY };
 
         try {
-            this.model.internalModel.coreModel.setParameterValueById('ParamAngleX', paramX * 30);
-            this.model.internalModel.coreModel.setParameterValueById('ParamAngleY', paramY * 30);
-            this.model.internalModel.coreModel.setParameterValueById('ParamBodyAngleX', paramX * 10);
-            this.model.internalModel.coreModel.setParameterValueById('ParamEyeBallX', paramX);
-            this.model.internalModel.coreModel.setParameterValueById('ParamEyeBallY', paramY);
-        } catch (e) {
-            // Parameters might not exist
-        }
+            const cm = this.model.internalModel.coreModel;
+            cm.setParameterValueById('ParamAngleX', paramX * 30);
+            cm.setParameterValueById('ParamAngleY', paramY * 30);
+            cm.setParameterValueById('ParamBodyAngleX', paramX * 10);
+            cm.setParameterValueById('ParamEyeBallX', paramX);
+            cm.setParameterValueById('ParamEyeBallY', paramY);
+        } catch (e) {}
     }
 
-    // --- Private ---
+    // --- Private: Mouth control ---
 
-    _setMouthOpen(value) {
+    _setMouthParams({ mouthOpen, mouthForm }) {
         if (!this.model || !this.isLoaded) return;
 
         try {
-            const coreModel = this.model.internalModel.coreModel;
-            coreModel.setParameterValueById('ParamMouthOpenY', value);
-        } catch (e) {
-            // Parameter might not exist
-        }
+            const cm = this.model.internalModel.coreModel;
+            cm.setParameterValueById('ParamMouthOpenY', mouthOpen);
+
+            // Only drive form from lip sync if not overridden by emotion
+            // Blend: lip sync form + emotion form
+            const emotionForm = this._activeEmotionParams.ParamMouthForm || 0;
+            const blendedForm = mouthOpen > 0.05
+                ? emotionForm * 0.4 + mouthForm * 0.6
+                : emotionForm;
+            cm.setParameterValueById('ParamMouthForm', blendedForm);
+        } catch (e) {}
     }
+
+    // --- Private: Expression transition ---
 
     _animateTransition(transition) {
         if (!this.model) return;
 
-        // Cancel existing transition
         if (this._transitionAnimation) {
             cancelAnimationFrame(this._transitionAnimation);
         }
@@ -191,18 +209,19 @@ class Live2DController {
             const elapsed = performance.now() - startTime;
             const progress = Math.min(elapsed / duration, 1.0);
 
-            // Interpolate parameters
             const params = this.emotionMapper.interpolateParams(fromEmotion, toEmotion, progress);
 
-            // Apply to model
             try {
-                const coreModel = this.model.internalModel.coreModel;
+                const cm = this.model.internalModel.coreModel;
                 for (const [key, value] of Object.entries(params)) {
-                    coreModel.setParameterValueById(key, value);
+                    // Skip mouth open during speech (lip sync controls it)
+                    if (key === 'ParamMouthOpenY' && this._isSpeaking) continue;
+                    cm.setParameterValueById(key, value);
                 }
-            } catch (e) {
-                // Silently handle missing parameters
-            }
+            } catch (e) {}
+
+            // Store current emotion params for blending
+            this._activeEmotionParams = params;
 
             if (progress < 1.0) {
                 this._transitionAnimation = requestAnimationFrame(animate);
@@ -214,29 +233,31 @@ class Live2DController {
         animate();
     }
 
+    // --- Private: Idle animation ---
+
     _startIdleAnimation() {
-        // Subtle idle movements (breathing, eye blinks)
+        if (this._idleTimer) cancelAnimationFrame(this._idleTimer);
+
         const idleLoop = () => {
             if (!this.model || !this.isLoaded) return;
 
             const time = performance.now() / 1000;
 
             try {
-                const coreModel = this.model.internalModel.coreModel;
+                const cm = this.model.internalModel.coreModel;
 
                 // Breathing
-                const breathValue = Math.sin(time * 0.8) * 0.05;
-                coreModel.setParameterValueById('ParamBreath', breathValue + 0.5);
+                const breathValue = Math.sin(time * 0.8) * 0.05 + 0.5;
+                cm.setParameterValueById('ParamBreath', breathValue);
 
-                // Subtle body sway
-                const swayX = Math.sin(time * 0.3) * 2;
-                const swayY = Math.cos(time * 0.5) * 1;
-                coreModel.setParameterValueById('ParamBodyAngleX', swayX);
-                coreModel.setParameterValueById('ParamBodyAngleZ', swayY);
-
-            } catch (e) {
-                // Parameters might not exist
-            }
+                // Subtle body sway (only when not overridden by emotion transition)
+                if (!this._transitionAnimation) {
+                    const swayX = Math.sin(time * 0.3) * 2;
+                    const swayY = Math.cos(time * 0.5) * 1;
+                    cm.setParameterValueById('ParamBodyAngleX', swayX);
+                    cm.setParameterValueById('ParamBodyAngleZ', swayY);
+                }
+            } catch (e) {}
 
             this._idleTimer = requestAnimationFrame(idleLoop);
         };
@@ -244,12 +265,71 @@ class Live2DController {
         idleLoop();
     }
 
+    // --- Private: Natural eye blinking ---
+
+    _startBlinking() {
+        if (this._blinkTimer) clearTimeout(this._blinkTimer);
+
+        const scheduleBlink = () => {
+            // Random interval: 2-6 seconds between blinks
+            const interval = 2000 + Math.random() * 4000;
+            this._blinkTimer = setTimeout(() => {
+                this._doBlink();
+                scheduleBlink();
+            }, interval);
+        };
+
+        scheduleBlink();
+    }
+
+    _doBlink() {
+        if (!this.model || !this.isLoaded) return;
+
+        const blinkDuration = 120; // ms for full close
+        const startTime = performance.now();
+
+        const animateBlink = () => {
+            const elapsed = performance.now() - startTime;
+            const totalDuration = blinkDuration * 2; // close + open
+            let eyeOpen;
+
+            if (elapsed < blinkDuration) {
+                // Closing
+                eyeOpen = 1.0 - (elapsed / blinkDuration);
+            } else if (elapsed < totalDuration) {
+                // Opening
+                eyeOpen = (elapsed - blinkDuration) / blinkDuration;
+            } else {
+                // Done
+                eyeOpen = 1.0;
+            }
+
+            // Respect emotion's eye settings as the baseline
+            const emotionEyeL = this._activeEmotionParams.ParamEyeLOpen;
+            const emotionEyeR = this._activeEmotionParams.ParamEyeROpen;
+            const baseL = emotionEyeL !== undefined ? emotionEyeL : 1.0;
+            const baseR = emotionEyeR !== undefined ? emotionEyeR : 1.0;
+
+            try {
+                const cm = this.model.internalModel.coreModel;
+                cm.setParameterValueById('ParamEyeLOpen', baseL * eyeOpen);
+                cm.setParameterValueById('ParamEyeROpen', baseR * eyeOpen);
+            } catch (e) {}
+
+            if (elapsed < totalDuration) {
+                requestAnimationFrame(animateBlink);
+            }
+        };
+
+        animateBlink();
+    }
+
+    // --- Private: Interaction ---
+
     _onModelTap() {
-        // React to being tapped
         console.log('[Live2D] Model tapped!');
         this.setEmotion('surprised');
 
-        // Return to neutral after a moment
         setTimeout(() => {
             this.setEmotion(this.emotionMapper.currentEmotion || 'neutral');
         }, 2000);

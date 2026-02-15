@@ -108,10 +108,34 @@ class EmotionMapper {
                     ParamCheek: 1.0,  // Blush
                 }
             },
+            angry: {
+                expression: 'angry',
+                motionGroup: 'Angry',
+                emoji: '😠',
+                params: {
+                    ParamEyeLOpen: 0.9,
+                    ParamEyeROpen: 0.9,
+                    ParamMouthForm: -0.6,
+                    ParamBrowLY: -0.6,
+                    ParamBrowRY: -0.6,
+                }
+            },
+            sad: {
+                expression: 'sad',
+                motionGroup: 'Sad',
+                emoji: '😢',
+                params: {
+                    ParamEyeLOpen: 0.7,
+                    ParamEyeROpen: 0.7,
+                    ParamMouthForm: -0.3,
+                    ParamBrowLY: -0.5,
+                    ParamBrowRY: -0.3,
+                }
+            },
         };
 
         this.currentEmotion = 'neutral';
-        this.transitionDuration = 300; // ms
+        this.transitionDuration = 500; // ms (smoother blend)
     }
 
     /**

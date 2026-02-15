@@ -95,22 +95,24 @@ async function playAudioB64(b64data, format) {
         const source = audioContext.createBufferSource();
         source.buffer = audioBuffer;
 
-        // Create analyser for real-time lip sync
+        // Create analyser for frequency-based lip sync
         const analyser = audioContext.createAnalyser();
-        analyser.fftSize = 256;
+        analyser.fftSize = 512;  // Higher resolution for frequency band analysis
 
         // Route: source → analyser → speakers
         source.connect(analyser);
         analyser.connect(audioContext.destination);
 
-        // Drive lip sync from real-time audio analysis
+        // Drive lip sync from real-time frequency analysis
         if (live2d) {
+            live2d.setSpeaking(true);
             live2d.lipSync.startWithAnalyser(analyser);
         }
 
         // Stop lip sync when audio finishes
         source.onended = () => {
             if (live2d) {
+                live2d.setSpeaking(false);
                 live2d.lipSync.stop();
             }
         };
