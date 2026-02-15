@@ -13,7 +13,7 @@ from src.core.emotion_analyzer import EmotionAnalyzer
 from src.core.interrupt_handler import InterruptHandler, PipelineState
 from src.core.llm_router import LLMMessage, LLMResponse, LLMRouter, LLMTask
 from src.memory.memory_manager import MemoryManager
-from src.mcp.tool_registry import ToolRegistry
+from src.mcp.tool_registry import ToolContext, ToolRegistry
 from src.utils.config_loader import get_persona_config
 from src.utils.logger import get_logger
 
@@ -165,7 +165,13 @@ class DialoguePipeline:
 
         # Execute tool calls if any (with permission check)
         if response.tool_calls:
-            tool_results = await self._execute_tools(response.tool_calls, speaker_profile)
+            tool_ctx = ToolContext(
+                speaker_id=speaker_id,
+                speaker_role=speaker_profile.get("role") if speaker_profile else None,
+                language=speaker_profile.get("language", "japanese") if speaker_profile else "japanese",
+                session_id=request_id,
+            )
+            tool_results = await self._execute_tools(response.tool_calls, speaker_profile, tool_ctx)
             if tool_results:
                 # Send tool results back to LLM for natural response
                 tool_context = "\n".join(
@@ -186,7 +192,8 @@ class DialoguePipeline:
         return response
 
     async def _execute_tools(
-        self, tool_calls: list[dict], speaker_profile: Optional[dict] = None
+        self, tool_calls: list[dict], speaker_profile: Optional[dict] = None,
+        tool_ctx: Optional[ToolContext] = None,
     ) -> list[dict]:
         """Execute MCP tool calls with permission checking.
 
@@ -219,7 +226,7 @@ class DialoguePipeline:
             await self._broadcast_to_frontend(self.emotion.get_emotion_for_frontend())
 
             try:
-                result = await self.tools.execute(tool_name, arguments)
+                result = await self.tools.execute(tool_name, arguments, ctx=tool_ctx)
                 results.append({
                     "name": tool_name,
                     "result": str(result),

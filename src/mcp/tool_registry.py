@@ -8,12 +8,22 @@ import importlib
 import inspect
 import pkgutil
 from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from src.utils.config_loader import get_main_config
 from src.utils.logger import get_logger
 
 logger = get_logger("mcp")
+
+
+@dataclass
+class ToolContext:
+    """Context passed to every tool execution."""
+    speaker_id: Optional[str] = None
+    speaker_role: Optional[str] = None  # "boss", "staff", "visitor"
+    language: str = "japanese"
+    session_id: Optional[str] = None
 
 
 class MCPTool:
@@ -24,6 +34,8 @@ class MCPTool:
     - description: str - what the tool does (shown to LLM)
     - parameters: dict - JSON Schema for parameters
     - execute(**kwargs) - the tool logic
+
+    Tools receive a `ctx` (ToolContext) kwarg with speaker/session info.
     """
 
     name: str = ""
@@ -32,6 +44,8 @@ class MCPTool:
 
     async def execute(self, **kwargs) -> Any:
         """Execute the tool with given parameters.
+
+        kwargs always includes 'ctx' (ToolContext) with speaker/session info.
 
         Returns:
             Tool result (will be converted to string for LLM).
@@ -104,12 +118,13 @@ class ToolRegistry:
         """Get a tool by name."""
         return self._tools.get(name)
 
-    async def execute(self, tool_name: str, arguments: dict) -> Any:
+    async def execute(self, tool_name: str, arguments: dict, ctx: Optional[ToolContext] = None) -> Any:
         """Execute a tool by name.
 
         Args:
             tool_name: Name of the tool to execute.
             arguments: Tool parameters.
+            ctx: Optional tool context with speaker/session info.
 
         Returns:
             Tool execution result.
@@ -122,6 +137,8 @@ class ToolRegistry:
             raise ValueError(f"Tool not found: {tool_name}")
 
         logger.info(f"Executing tool: {tool_name}")
+        # Inject context into kwargs
+        arguments["ctx"] = ctx or ToolContext()
         try:
             result = await tool.execute(**arguments)
             logger.info(f"Tool {tool_name} completed successfully")

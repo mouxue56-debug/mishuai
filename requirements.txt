@@ -31,6 +31,7 @@ aiosqlite>=0.19.0
 
 # --- MCP Tools ---
 notion-client>=2.2.0
+rank_bm25>=0.2.2
 # linebot>=3.0.0  # LINE Messaging API
 
 # --- WebSocket / Frontend ---

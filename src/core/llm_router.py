@@ -106,6 +106,10 @@ class LLMRouter:
         trivia_list = char.get("cat_trivia", [])
         trivia_text = "\n".join(f"- {t}" for t in trivia_list[:3])
 
+        # Privacy rules
+        privacy_rules = self.persona.get("privacy_rules", [])
+        privacy_text = "\n".join(f"- {r}" for r in privacy_rules)
+
         prompt = f"""あなたは「{char.get('name', 'ミケ')}」です。{char.get('role', 'AI秘書')}として働いています。
 
 ## 性格
@@ -149,8 +153,10 @@ class LLMRouter:
 - 朝（6:00-11:59）: 元気。「おはようございます！」
 - 午後・夕方: 通常モード
 
+## プライバシー・安全ルール（厳守）
+{privacy_text}
+
 ## 重要な注意
-- 医療に関するアドバイスは絶対にしない（慈恵病院の件は必ずWillに取り次ぐ）
 - 猫舎の正式名称は「サイベリアン｜大阪・福楽キャッテリー」
 - 「サイベリアン専門福楽猫舎」は旧称なので使わないこと
 """
@@ -396,28 +402,17 @@ class LLMRouter:
         logger.info(f"LLM request: provider={provider.value}, model={model_config.get('model')}, task={task.value}")
 
         try:
-            if provider == LLMProvider.ANTHROPIC:
-                return await self._call_anthropic(api_messages, model_config)
-            elif provider == LLMProvider.GOOGLE:
-                return await self._call_google(api_messages, model_config)
-            else:
-                return await self._call_openai_compatible(api_messages, model_config, provider.value)
+            result = await self._call_with_retry(api_messages, model_config, provider)
+            return result
         except Exception as e:
             logger.error(f"LLM call failed ({provider.value}): {e}")
             # Try fallback
             fallback_config = self.llm_config.get(task.value, {}).get("fallback")
             if fallback_config and fallback_config != model_config:
-                logger.info("Attempting fallback model...")
                 fallback_provider = LLMProvider(fallback_config.get("provider", "google"))
+                logger.info(f"Attempting fallback: {fallback_provider.value}")
                 try:
-                    if fallback_provider == LLMProvider.ANTHROPIC:
-                        return await self._call_anthropic(api_messages, fallback_config)
-                    elif fallback_provider == LLMProvider.GOOGLE:
-                        return await self._call_google(api_messages, fallback_config)
-                    else:
-                        return await self._call_openai_compatible(
-                            api_messages, fallback_config, fallback_provider.value
-                        )
+                    return await self._call_with_retry(api_messages, fallback_config, fallback_provider)
                 except Exception as e2:
                     logger.error(f"Fallback also failed: {e2}")
 
@@ -427,6 +422,43 @@ class LLMRouter:
                 emotion="worried",
                 model="error",
             )
+
+    async def _dispatch_call(
+        self, messages: list[dict], model_config: dict, provider: LLMProvider
+    ) -> LLMResponse:
+        """Dispatch a single LLM call to the correct provider."""
+        if provider == LLMProvider.ANTHROPIC:
+            return await self._call_anthropic(messages, model_config)
+        elif provider == LLMProvider.GOOGLE:
+            return await self._call_google(messages, model_config)
+        else:
+            return await self._call_openai_compatible(messages, model_config, provider.value)
+
+    async def _call_with_retry(
+        self,
+        messages: list[dict],
+        model_config: dict,
+        provider: LLMProvider,
+        max_retries: int = 2,
+    ) -> LLMResponse:
+        """Call LLM with retry on transient errors (network, rate limit)."""
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                return await self._dispatch_call(messages, model_config, provider)
+            except Exception as e:
+                last_error = e
+                err_str = str(e).lower()
+                is_transient = any(k in err_str for k in [
+                    "timeout", "rate_limit", "429", "502", "503", "504",
+                    "connection", "network", "temporarily",
+                ])
+                if not is_transient or attempt == max_retries:
+                    raise
+                delay = 2 ** (attempt + 1)  # 2s, 4s
+                logger.warning(f"LLM transient error (attempt {attempt+1}/{max_retries+1}), retrying in {delay}s: {e}")
+                await asyncio.sleep(delay)
+        raise last_error  # unreachable, but makes type checker happy
 
     async def chat_stream(
         self,
