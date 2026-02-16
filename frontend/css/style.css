@@ -211,46 +211,33 @@ body {
     background: #7B1FA2;
 }
 
-/* --- Settings Panel --- */
-#settings-panel {
-    position: fixed;
-    top: 50px;
-    left: 10px;
-    width: 250px;
-    padding: 16px;
-    background: rgba(255, 255, 255, 0.95);
-    border-radius: 12px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
-    z-index: 200;
-    backdrop-filter: blur(10px);
+#btn-mic {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border-radius: 50%;
+    background: #666;
+    font-size: 18px;
+    flex-shrink: 0;
+    transition: background 0.2s;
 }
 
-#settings-panel.hidden {
-    display: none;
+#btn-mic.recording {
+    background: #F44336;
+    animation: pulse 1s infinite;
 }
 
-#settings-panel h3 {
-    margin-bottom: 12px;
-    font-size: 15px;
+#btn-mic:hover {
+    background: #555;
 }
 
-.setting-group {
-    margin-bottom: 12px;
+#btn-mic.recording:hover {
+    background: #D32F2F;
 }
 
-.setting-group label {
-    display: block;
-    font-size: 12px;
-    color: #666;
-    margin-bottom: 4px;
-}
-
-.setting-group select {
-    width: 100%;
-    padding: 6px 10px;
-    border: 1px solid #ddd;
-    border-radius: 6px;
-    font-size: 13px;
+/* --- Settings button active state --- */
+#btn-settings.active {
+    background: #9C27B0;
 }
 
 /* --- Controls --- */
@@ -308,10 +295,6 @@ body {
 
     #chat-panel {
         width: 280px;
-    }
-
-    #settings-panel {
-        width: 220px;
     }
 
     #subtitle-text {
@@ -412,20 +395,6 @@ body {
         line-height: 1.5;
     }
 
-    /* Settings panel: full-width overlay */
-    #settings-panel {
-        top: auto;
-        bottom: 60px;
-        left: 8px;
-        right: 8px;
-        width: auto;
-        padding: 14px;
-    }
-
-    .setting-group select {
-        font-size: 16px;  /* Prevent iOS zoom */
-        padding: 8px 10px;
-    }
 }
 
 /* --- Very small phones (iPhone SE, etc.) --- */
@@ -475,11 +444,4 @@ body {
         transform: none;
     }
 
-    #settings-panel {
-        bottom: auto;
-        top: 50px;
-        left: 8px;
-        right: auto;
-        width: 220px;
-    }
 }

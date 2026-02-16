@@ -32,6 +32,15 @@ class Live2DController {
         this._blinkPhase = 'open';  // 'open' | 'closing' | 'opening'
         this._blinkProgress = 0;
         this._isSpeaking = false;
+
+        // Zoom & drag state
+        this._baseScale = 1;       // Scale computed from loadModel
+        this._userZoom = 1;        // User zoom multiplier (0.3 - 3.0)
+        this._dragOffset = { x: 0, y: 0 };
+        this._isDragging = false;
+        this._dragStart = { x: 0, y: 0 };
+        this._pinchStartDist = 0;
+        this._pinchStartZoom = 1;
     }
 
     /**
@@ -59,6 +68,9 @@ class Live2DController {
         };
         this.lipSync.onVolumeUpdate = null; // Use onMouthUpdate instead
 
+        // Set up zoom & drag interactions
+        this._setupZoomDrag(canvas);
+
         console.log('[Live2D] Renderer initialized (v2)');
     }
 
@@ -79,12 +91,19 @@ class Live2DController {
 
             this.model = await PIXI.live2d.Live2DModel.from(modelPath);
 
+            // Use internalModel dimensions for correct scaling
+            // (model.width/height is unreliable right after loading)
+            const modelW = this.model.internalModel.originalWidth || this.model.width;
+            const modelH = this.model.internalModel.originalHeight || this.model.height;
             const scale = Math.min(
-                this.app.screen.width / this.model.width,
-                this.app.screen.height / this.model.height
+                this.app.screen.width / modelW,
+                this.app.screen.height / modelH
             ) * 0.8;
 
-            this.model.scale.set(scale);
+            this._baseScale = scale;
+            this._userZoom = 1;
+            this._dragOffset = { x: 0, y: 0 };
+            this.model.scale.set(scale * this._userZoom);
             this.model.x = this.app.screen.width / 2;
             this.model.y = this.app.screen.height;
             this.model.anchor.set(0.5, 1.0);
@@ -341,13 +360,105 @@ class Live2DController {
     onResize() {
         if (!this.model || !this.app) return;
 
+        const modelW = this.model.internalModel.originalWidth || this.model.width;
+        const modelH = this.model.internalModel.originalHeight || this.model.height;
         const scale = Math.min(
-            this.app.screen.width / this.model.width,
-            this.app.screen.height / this.model.height
+            this.app.screen.width / modelW,
+            this.app.screen.height / modelH
         ) * 0.8;
 
-        this.model.scale.set(scale);
-        this.model.x = this.app.screen.width / 2;
-        this.model.y = this.app.screen.height;
+        this._baseScale = scale;
+        this.model.scale.set(scale * this._userZoom);
+        this.model.x = this.app.screen.width / 2 + this._dragOffset.x;
+        this.model.y = this.app.screen.height + this._dragOffset.y;
+    }
+
+    // --- Zoom & Drag ---
+
+    _applyTransform() {
+        if (!this.model) return;
+        this.model.scale.set(this._baseScale * this._userZoom);
+        this.model.x = this.app.screen.width / 2 + this._dragOffset.x;
+        this.model.y = this.app.screen.height + this._dragOffset.y;
+    }
+
+    _setupZoomDrag(canvas) {
+        // Mouse wheel zoom
+        canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const zoomSpeed = 0.001;
+            this._userZoom *= 1 - e.deltaY * zoomSpeed;
+            this._userZoom = Math.max(0.3, Math.min(3.0, this._userZoom));
+            this._applyTransform();
+        }, { passive: false });
+
+        // Mouse drag
+        canvas.addEventListener('mousedown', (e) => {
+            // Middle mouse or left + alt for drag
+            if (e.button === 1 || (e.button === 0 && e.altKey)) {
+                this._isDragging = true;
+                this._dragStart = { x: e.clientX - this._dragOffset.x, y: e.clientY - this._dragOffset.y };
+                e.preventDefault();
+            }
+        });
+        canvas.addEventListener('mousemove', (e) => {
+            if (this._isDragging) {
+                this._dragOffset.x = e.clientX - this._dragStart.x;
+                this._dragOffset.y = e.clientY - this._dragStart.y;
+                this._applyTransform();
+            }
+        });
+        canvas.addEventListener('mouseup', () => { this._isDragging = false; });
+        canvas.addEventListener('mouseleave', () => { this._isDragging = false; });
+
+        // Touch: pinch-to-zoom + two-finger drag
+        canvas.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                this._pinchStartDist = Math.hypot(dx, dy);
+                this._pinchStartZoom = this._userZoom;
+                // Center of two fingers for drag
+                this._isDragging = true;
+                const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                this._dragStart = { x: cx - this._dragOffset.x, y: cy - this._dragOffset.y };
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', (e) => {
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                // Pinch zoom
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                const dist = Math.hypot(dx, dy);
+                if (this._pinchStartDist > 0) {
+                    this._userZoom = this._pinchStartZoom * (dist / this._pinchStartDist);
+                    this._userZoom = Math.max(0.3, Math.min(3.0, this._userZoom));
+                }
+                // Two-finger drag
+                const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                this._dragOffset.x = cx - this._dragStart.x;
+                this._dragOffset.y = cy - this._dragStart.y;
+                this._applyTransform();
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', () => {
+            this._isDragging = false;
+            this._pinchStartDist = 0;
+        });
+
+        // Double-click/tap to reset
+        canvas.addEventListener('dblclick', (e) => {
+            if (e.altKey) {
+                this._userZoom = 1;
+                this._dragOffset = { x: 0, y: 0 };
+                this._applyTransform();
+            }
+        });
     }
 }

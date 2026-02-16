@@ -260,3 +260,92 @@ class SpeakerIdentifier:
         self._embeddings[speaker_id] = avg_embedding
         logger.info(f"Speaker registered: {speaker_id} ({len(embeddings)}/{len(audio_samples)} samples)")
         return True
+
+    async def register_speaker_from_webm(
+        self, speaker_id: str, webm_samples: list[bytes]
+    ) -> bool:
+        """Register a speaker from WebM/Opus audio (browser MediaRecorder format).
+
+        Converts webm to raw PCM int16 16kHz using ffmpeg, then registers.
+
+        Args:
+            speaker_id: Unique identifier for the speaker.
+            webm_samples: List of WebM audio byte arrays from browser.
+
+        Returns:
+            True if registration succeeded.
+        """
+        import subprocess
+
+        pcm_samples = []
+        for i, webm in enumerate(webm_samples):
+            try:
+                proc = subprocess.run(
+                    [
+                        "ffmpeg", "-i", "pipe:",
+                        "-f", "s16le", "-ar", "16000", "-ac", "1",
+                        "-loglevel", "error",
+                        "pipe:",
+                    ],
+                    input=webm,
+                    capture_output=True,
+                    timeout=10,
+                )
+                if proc.returncode == 0 and proc.stdout:
+                    pcm_samples.append(proc.stdout)
+                    logger.info(f"WebM→PCM converted sample {i+1}: {len(proc.stdout)} bytes")
+                else:
+                    logger.warning(f"ffmpeg conversion failed for sample {i+1}: {proc.stderr[:200]}")
+            except FileNotFoundError:
+                logger.error("ffmpeg not found — install ffmpeg for voice registration")
+                return False
+            except subprocess.TimeoutExpired:
+                logger.error(f"ffmpeg timeout for sample {i+1}")
+            except Exception as e:
+                logger.error(f"WebM conversion error for sample {i+1}: {e}")
+
+        if not pcm_samples:
+            logger.error("No valid PCM samples after conversion")
+            return False
+
+        return await self.register_speaker(speaker_id, pcm_samples)
+
+    def has_embedding(self, speaker_id: str) -> bool:
+        """Check if a speaker has a registered voice embedding.
+
+        Args:
+            speaker_id: Speaker to check.
+
+        Returns:
+            True if the speaker has a stored embedding.
+        """
+        return speaker_id in self._embeddings
+
+    def get_registered_speakers(self) -> list[str]:
+        """Get list of registered speaker IDs.
+
+        Returns:
+            List of speaker ID strings.
+        """
+        return list(self._embeddings.keys())
+
+    def delete_speaker(self, speaker_id: str) -> bool:
+        """Remove a speaker's voiceprint from memory and disk.
+
+        Args:
+            speaker_id: Speaker to remove.
+
+        Returns:
+            True if deleted.
+        """
+        # Remove from memory
+        if speaker_id in self._embeddings:
+            del self._embeddings[speaker_id]
+
+        # Remove from disk
+        npy_path = BASE_DIR / "data" / "speaker_embeddings" / f"{speaker_id}.npy"
+        if npy_path.exists():
+            npy_path.unlink()
+            logger.info(f"Voiceprint deleted: {speaker_id}")
+            return True
+        return False

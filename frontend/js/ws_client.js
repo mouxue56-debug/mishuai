@@ -86,6 +86,19 @@ class WSClient {
     }
 
     /**
+     * Send raw audio data to the backend for ASR + speaker identification.
+     * @param {string} audioBase64 - Base64-encoded audio data.
+     * @param {string} format - Audio MIME type (e.g., 'audio/webm').
+     */
+    sendAudio(audioBase64, format = 'audio/webm') {
+        this.send({
+            type: 'audio_input',
+            audio: audioBase64,
+            format: format,
+        });
+    }
+
+    /**
      * Send a command to the backend.
      * @param {string} command - Command name.
      * @param {*} data - Optional command data.

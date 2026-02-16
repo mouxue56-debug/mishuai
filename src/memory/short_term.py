@@ -20,6 +20,7 @@ class ShortTermMemory:
         self.messages: deque[dict] = deque(maxlen=max_turns * 2)  # *2 for user+assistant
         self.current_emotion: str = "neutral"
         self.current_speaker: Optional[str] = None
+        self.session_id: Optional[str] = None
         self.session_start: datetime = datetime.now()
 
     def add(self, role: str, content: str):

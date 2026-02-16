@@ -2,6 +2,9 @@
 
 Stores session summaries and daily work logs in SQLite.
 Used to provide context about "what happened earlier today".
+
+Uses the same _schema_version table as long_term (shared database).
+Mid-term tables have their own version namespace via _mid_schema_version.
 """
 
 import json
@@ -14,6 +17,9 @@ from src.utils.logger import get_logger
 
 logger = get_logger("memory.mid")
 
+# Mid-term schema version (independent from long-term)
+MID_SCHEMA_VERSION = 1
+
 
 class MidTermMemory:
     """SQLite-backed session and daily summary storage."""
@@ -23,8 +29,27 @@ class MidTermMemory:
         self._db: Optional[aiosqlite.Connection] = None
 
     async def initialize(self):
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist, with schema version tracking."""
         self._db = await aiosqlite.connect(self.db_path)
+
+        # --- Schema version tracking (mid-term namespace) ---
+        await self._db.execute("""
+            CREATE TABLE IF NOT EXISTS _mid_schema_version (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+            )
+        """)
+        await self._db.commit()
+
+        # Get current version
+        async with self._db.execute(
+            "SELECT version FROM _mid_schema_version WHERE id = 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+            current_version = row[0] if row else 0
+
+        # Create tables
         await self._db.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,7 +74,17 @@ class MidTermMemory:
             )
         """)
         await self._db.commit()
-        logger.info("Mid-term memory tables ready")
+
+        # Set version if fresh
+        if current_version == 0:
+            await self._db.execute(
+                """INSERT OR REPLACE INTO _mid_schema_version (id, version, updated_at)
+                   VALUES (1, ?, datetime('now', 'localtime'))""",
+                (MID_SCHEMA_VERSION,),
+            )
+            await self._db.commit()
+
+        logger.info(f"Mid-term memory tables ready (schema v{MID_SCHEMA_VERSION})")
 
     async def close(self):
         """Close database connection."""

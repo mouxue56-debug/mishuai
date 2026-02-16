@@ -50,9 +50,25 @@ class MicrophoneInput:
         self._vad = None
         self._silero_model = None
         self._running = False
+        self._suppressed = False  # Echo suppression during TTS playback
         self._on_utterance: Optional[Callable] = None
         self._on_speech_start: Optional[Callable] = None
         self._on_speech_end: Optional[Callable] = None
+
+    def suppress_echo(self):
+        """Start echo suppression (during TTS playback).
+
+        While suppressed:
+        - on_speech_start still fires → allows registered user to interrupt
+        - on_utterance is BLOCKED → prevents TTS echo from being processed as input
+        """
+        self._suppressed = True
+        logger.debug("Echo suppression ON")
+
+    def stop_suppress(self):
+        """Stop echo suppression (after TTS playback ends)."""
+        self._suppressed = False
+        logger.debug("Echo suppression OFF")
 
     def on_utterance(self, callback: Callable):
         """Register callback for when a complete utterance is detected."""
@@ -188,6 +204,8 @@ class MicrophoneInput:
                         is_speaking = True
                         silence_frames = 0
                         logger.debug("Speech started")
+                        # on_speech_start always fires (even during echo suppression)
+                        # — this allows barge-in interrupts
                         if self._on_speech_start:
                             await self._on_speech_start()
                         # Include pre-speech buffer
@@ -201,18 +219,21 @@ class MicrophoneInput:
                         silence_frames += 1
 
                         if silence_frames >= silence_threshold_frames:
-                            # Speech ended - send utterance
+                            # Speech ended
                             is_speaking = False
                             logger.debug(f"Speech ended ({len(speech_frames)} frames)")
 
                             if self._on_speech_end:
                                 await self._on_speech_end()
 
-                            # Combine frames and send
+                            # Combine frames
                             audio_data = b"".join(speech_frames)
                             speech_frames = []
 
-                            if self._on_utterance:
+                            # Echo suppression: drop utterance during TTS playback
+                            if self._suppressed:
+                                logger.debug("Utterance dropped (echo suppression)")
+                            elif self._on_utterance:
                                 await self._on_utterance(audio_data)
                     else:
                         pre_speech_buffer.append(frame)

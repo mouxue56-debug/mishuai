@@ -16,8 +16,8 @@ llm:
     primary:
       provider: "qianwen"
       model: "qwen-plus"
-      max_tokens: 1024
-      temperature: 0.8
+      max_tokens: 2048
+      temperature: 1.3
     fallback:
       provider: "qianwen"
       model: "qwen-plus"
@@ -51,12 +51,18 @@ llm:
       temperature: 0.5
 
   # Current active mode: "quality" | "balanced" | "budget"
-  active_mode: "balanced"
+  active_mode: "budget"
 
 # --- ASR (Speech Recognition) ---
 asr:
-  engine: "sherpa_onnx"  # "sherpa_onnx" | "faster_whisper" | "google"
-  language: "ja"
+  engine: "dashscope" # "dashscope" | "sherpa_onnx" | "faster_whisper"
+  language:  # Multi-language hints for DashScope
+  - zh
+  - en
+  - ja
+  dashscope:
+    model: "paraformer-realtime-v2"
+    sample_rate: 16000
   sherpa_onnx:
     model_path: "models/asr/"
     sample_rate: 16000
@@ -65,22 +71,31 @@ asr:
 tts:
   # Japanese TTS
   japanese:
-    engine: "edge_tts"  # "voicevox" | "edge_tts"
+    engine: "cosyvoice_dashscope" # "voicevox" | "cosyvoice_dashscope" | "edge_tts"
     voicevox:
       host: "http://127.0.0.1:50021"
       speaker_id: 3  # ずんだもん (can change to preferred voice)
-      speed_scale: 1.1
-      pitch_scale: 0.0
+      character: "zundamon"  # Emotion style mapping: "zundamon" | "metan"
+      speed_scale: 1
+      pitch_scale: -0.06
       intonation_scale: 1.2
+    cosyvoice_dashscope:
+      model: "cosyvoice-v3-flash"     # "cosyvoice-v3-flash" (fast) | "cosyvoice-v2-0.5b" (quality)
+      voice: "loongriko_v3"           # Japanese-friendly voice
+      format: "wav"
+      sample_rate: 22050
     edge_tts:
       voice: "ja-JP-NanamiNeural"
       rate: "+10%"
 
   # Chinese TTS
   chinese:
-    engine: "edge_tts"  # "cosyvoice" | "edge_tts"
-    cosyvoice:
-      model_path: "models/cosyvoice/"
+    engine: "cosyvoice_dashscope"  # "cosyvoice_dashscope" | "edge_tts"
+    cosyvoice_dashscope:
+      model: "cosyvoice-v3-flash"
+      voice: "longxiaochun_v2"        # Chinese voice
+      format: "wav"
+      sample_rate: 22050
     edge_tts:
       voice: "zh-CN-XiaoxiaoNeural"
       rate: "+5%"
@@ -91,12 +106,12 @@ tts:
 # --- Audio ---
 audio:
   input:
-    device_index: null  # null = default mic
+    device_index:       # null = default mic
     sample_rate: 16000
     channels: 1
     chunk_size: 1024
   output:
-    device_index: null  # null = default speaker
+    device_index:       # null = default speaker
     sample_rate: 24000
   vad:
     engine: "webrtc"  # "webrtc" (lightweight) | "silero" (ML-based, more accurate)
@@ -107,14 +122,14 @@ audio:
   wake_word:
     enabled: true
     engine: "sherpa_onnx"  # "sherpa_onnx" | "custom"
-    keyword: "ミケちゃん"
+    keyword: "ユキちゃん"
     sensitivity: 0.5
 
 # --- Speaker Recognition ---
 speaker:
   enabled: true
   engine: "resemblyzer"  # "resemblyzer" (lightweight) | "3d_speaker" (accurate)
-  similarity_threshold: 0.68
+  similarity_threshold: 0.5
   sample_rate: 16000
   profiles_path: "config/speaker_profiles.yaml"
 
@@ -124,22 +139,25 @@ vision:
   camera_index: 0
   capture_interval_sec: 10  # Seconds between captures
   model: "gemini-2.0-flash"
-  resolution: [640, 480]
+  resolution:
+  - 640
+  - 480
   jpeg_quality: 70
   prompt: >
-    この画像は猫カフェ/キャッテリーの受付カメラです。
-    簡潔に(1-2文で)シーンを説明してください。
-    人が写っている場合は「[PERSON]」タグを先頭に付けてください。
-    猫が写っている場合は「[CAT]」タグを付けてください。
-    特に変化がなく静かなシーンなら「[QUIET]」とだけ返してください。
+    この画像は猫カフェ/キャッテリーの受付カメラです。 簡潔に(1-2文で)シーンを説明してください。 人が写っている場合は「[PERSON]」タグを先頭に付けてください。 猫が写っている場合は「[CAT]」タグを付けてください。 特に変化がなく静かなシーンなら「[QUIET]」とだけ返してください。
 
 # --- Proactive Scheduler ---
 proactive:
   enabled: true
-  idle_timeout_min: 15       # Minutes before idle chatter
-  greeting_hours: [9, 13]    # Hours to send time-based greetings
-  check_interval_sec: 60     # How often to check triggers
-  cooldown_sec: 300          # Minimum seconds between proactive messages
+  idle_timeout_min: 15       # (Legacy) Minutes before idle chatter
+  idle_min_sec: 60           # Min random idle interval (1 min)
+  idle_max_sec: 300          # Max random idle interval (5 min)
+  greeting_hours:            # Hours to send time-based greetings
+  - 9
+  - 13
+  check_interval_sec: 30     # How often to check triggers
+  cooldown_sec: 60           # Minimum seconds between proactive messages
+  weather_location: "Osaka"  # City for weather info (wttr.in format)
 
 # --- Memory ---
 memory:
@@ -160,21 +178,19 @@ websocket:
 # --- MCP Tools ---
 mcp:
   enabled_tools:
-    - "search_customers"
-    - "add_memo"
-    - "set_reminder"
-    - "draft_line_message"
-    - "cattery_knowledge"
-    - "check_schedule"
-    - "generate_sns_caption"
-
-# --- Notion ---
+  - search_customers
+  - add_memo
+  - set_reminder
+  - draft_line_message
+  - cattery_knowledge
+  - check_schedule
+  - generate_sns_caption
 notion:
   customer_database_id: ""  # Fill from .env
 
 # --- Logging ---
 logging:
-  level: "INFO"  # DEBUG | INFO | WARNING | ERROR
+  level: "DEBUG" # DEBUG | INFO | WARNING | ERROR
   file: "logs/secretary.log"
   rotation: "10 MB"
   retention: "7 days"

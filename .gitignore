@@ -31,6 +31,7 @@ config/secrets.yaml
 data/*.db
 data/*.sqlite
 data/*.sqlite3
+data/speaker_embeddings/
 
 # Live2D models (large binary files)
 frontend/models/*.moc3

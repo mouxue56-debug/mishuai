@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>ミケ - 福楽キャッテリー AI秘書</title>
     <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/settings_drawer.css">
 
     <!-- Live2D Cubism SDK (CDN) -->
     <!-- NOTE: You need to download the Live2D Cubism SDK for Web and host it locally
@@ -39,44 +40,26 @@
             <div id="chat-toggle" onclick="toggleChat()">💬 チャット</div>
             <div id="chat-messages"></div>
             <div id="chat-input-area">
+                <button id="btn-mic" onclick="toggleVoiceInput()" title="音声入力">🎤</button>
                 <input type="text" id="chat-input" placeholder="テキストで話しかける..."
                        onkeydown="if(event.key==='Enter')sendChat()">
                 <button onclick="sendChat()">送信</button>
             </div>
         </div>
 
-        <!-- Settings Panel -->
-        <div id="settings-panel" class="hidden">
-            <h3>設定</h3>
-            <div class="setting-group">
-                <label>LLMモード:</label>
-                <select id="llm-mode" onchange="setLLMMode(this.value)">
-                    <option value="quality">品質優先 (Claude)</option>
-                    <option value="balanced" selected>バランス (Gemini)</option>
-                    <option value="budget">節約 (GPT-4o mini)</option>
-                </select>
-            </div>
-            <div class="setting-group">
-                <label>言語:</label>
-                <select id="tts-language" onchange="setLanguage(this.value)">
-                    <option value="japanese" selected>日本語</option>
-                    <option value="chinese">中文</option>
-                </select>
-            </div>
-        </div>
-
         <!-- Control buttons -->
         <div id="controls">
-            <button id="btn-settings" onclick="toggleSettings()" title="設定">⚙️</button>
+            <button id="btn-settings" onclick="settingsDrawer.toggle()" title="設定">⚙️</button>
             <button id="btn-mute" onclick="toggleMute()" title="ミュート">🔊</button>
         </div>
     </div>
 
     <!-- Scripts -->
-    <script src="js/ws_client.js"></script>
+    <script src="js/ws_client.js?v=3"></script>
     <script src="js/emotion_mapper.js"></script>
     <script src="js/lip_sync.js"></script>
     <script src="js/live2d_controller.js"></script>
-    <script src="js/app.js"></script>
+    <script src="js/settings_drawer.js?v=2"></script>
+    <script src="js/app.js?v=9"></script>
 </body>
 </html>

@@ -1,7 +1,7 @@
 """Cattery knowledge base search tool.
 
 Searches the local knowledge base files using BM25 ranking.
-Covers: Siberian cats, Fukuraku Cattery FAQ, customer guides, hospital info.
+Covers: Siberian cats, Fukuraku Cattery FAQ, customer guides.
 """
 
 import re
@@ -22,8 +22,7 @@ CATEGORY_FILES = {
     "breed": ["breed_info.md"],
     "faq": ["cattery_faq.md"],
     "customer": ["customer_guide.md"],
-    "hospital": ["hospital_info.md"],
-    "all": ["cattery_faq.md", "breed_info.md", "customer_guide.md", "hospital_info.md"],
+    "all": ["cattery_faq.md", "breed_info.md", "customer_guide.md"],
 }
 
 
@@ -142,7 +141,7 @@ class CatteryKnowledgeTool(MCPTool):
     name = "cattery_knowledge"
     description = (
         "猫舎のナレッジベースを検索します。"
-        "サイベリアンの品種情報、FAQ、顧客対応ガイド、慈恵病院の情報を検索できます。"
+        "サイベリアンの品種情報、FAQ、顧客対応ガイドを検索できます。"
         "お客様からの質問に答える時に使います。"
     )
     parameters = {
@@ -153,13 +152,18 @@ class CatteryKnowledgeTool(MCPTool):
         },
         "category": {
             "type": "string",
-            "enum": ["all", "breed", "faq", "customer", "hospital"],
+            "enum": ["all", "breed", "faq", "customer"],
             "description": "検索カテゴリ（デフォルト: all）",
         },
     }
 
     def __init__(self):
         self._indexes: dict[str, _KnowledgeIndex] = {}
+
+    def invalidate_indexes(self):
+        """Clear all cached BM25 indexes so they rebuild on next query."""
+        self._indexes.clear()
+        logger.info("Knowledge indexes invalidated — will rebuild on next search")
 
     def _get_index(self, category: str) -> _KnowledgeIndex:
         """Get or build the BM25 index for a category."""
