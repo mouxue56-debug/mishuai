@@ -43,7 +43,7 @@ Microphone → VAD → ASR → Speaker ID
                     ├── Emotion Analysis
                     └── Memory System (Short/Mid/Long-term)
                               ↓
-                    TTS (VOICEVOX / Edge TTS)
+                    TTS (VOICEVOX / CosyVoice)
                               ↓
                     WebSocket → Live2D Frontend (Browser)
 ```
@@ -69,7 +69,7 @@ knowledge/               # Cattery knowledge base (Markdown)
 
 Edit `config/config.yaml` for:
 - LLM model selection and modes (quality/balanced/budget)
-- TTS engine settings (VOICEVOX/Edge TTS)
+- TTS engine settings (VOICEVOX/CosyVoice)
 - Audio input parameters
 - WebSocket server port
 

@@ -28,7 +28,7 @@ Verify:
 - [ ] During speech: mouth moves with frequency-based lip sync
 - [ ] During speech: expression changes based on emotion (happy/sad/angry/neutral)
 - [ ] After speech: model returns to idle animation (breathing + subtle sway)
-- [ ] Edge TTS audio plays in browser
+- [ ] TTS audio plays in browser (CosyVoice / VOICEVOX)
 - [ ] Mobile layout works (open on phone via local IP, e.g. `http://192.168.x.x:8080`)
 
 ## Task 2: Known Issues to Fix
@@ -68,7 +68,7 @@ Text Input (WebSocket) ──> Pipeline (LLM + Tools) ──> Output Queue
 Camera (Vision) ───────> Proactive Scheduler ──────────╱     │
 Time/Idle triggers ─────────────────────────────────────╱     ▼
                                                      Output Consumer
-                                                      ├── TTS (Edge TTS -> MP3)
+                                                      ├── TTS (CosyVoice -> WAV)
                                                       ├── WS: speech_start + emotion
                                                       ├── WS: audio (base64 MP3)
                                                       ├── WS: speech_end
@@ -90,7 +90,7 @@ Frontend:
 | `src/core/pipeline.py` | Dialogue pipeline (LLM + memory + tools) |
 | `src/core/proactive_scheduler.py` | Proactive speech triggers |
 | `src/vision/camera.py` | Camera -> Gemini Flash |
-| `src/audio/tts.py` | Edge TTS synthesis |
+| `src/audio/tts.py` | TTS synthesis (CosyVoice / VOICEVOX) |
 | `src/audio/speaker_id.py` | Speaker identification |
 | `frontend/js/app.js` | Frontend main (WebSocket + audio playback) |
 | `frontend/js/live2d_controller.js` | Live2D model control |

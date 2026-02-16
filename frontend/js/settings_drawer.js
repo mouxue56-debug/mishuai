@@ -165,7 +165,6 @@ class SettingsDrawer {
         panel.appendChild(this._createSelectFull('tts-engine', '引擎', [
             { value: 'voicevox', label: 'VOICEVOX（情感风格）' },
             { value: 'cosyvoice_dashscope', label: 'CosyVoice v3（自动情感）' },
-            { value: 'edge_tts', label: 'Edge TTS（轻量）' },
         ], (val) => {
             this._applyChange('tts.japanese', 'engine', val);
             this._updateVoicevoxVisibility(val);

@@ -5,53 +5,144 @@
 # --- Application ---
 app:
   name: "Fukuraku AI Secretary"
-  version: "0.3.0"
+  version: "0.4.0"
   language: "ja"  # Primary: Japanese
   debug: false
 
 # --- LLM Models (Multi-model routing) ---
 llm:
-  # Main conversation (personality matters)
+  # Provider definitions with pricing
+  providers:
+    anthropic:
+      api_key: "${ANTHROPIC_API_KEY}"
+      base_url: "https://api.anthropic.com/v1"
+      models:
+        - id: "claude-sonnet-4-5-20250929"
+          name: "Claude Sonnet 4.5"
+          input_cost_per_1m: 3.0
+          output_cost_per_1m: 15.0
+
+    openai:
+      api_key: "${OPENAI_API_KEY}"
+      base_url: "https://api.openai.com/v1"
+      models:
+        - id: "gpt-4o"
+          name: "GPT-4o"
+          input_cost_per_1m: 2.5
+          output_cost_per_1m: 10.0
+        - id: "gpt-4o-mini"
+          name: "GPT-4o Mini"
+          input_cost_per_1m: 0.15
+          output_cost_per_1m: 0.6
+
+    google:
+      api_key: "${GOOGLE_API_KEY}"
+      base_url: "https://generativelanguage.googleapis.com/v1beta"
+      models:
+        - id: "gemini-2.5-flash"
+          name: "Gemini 2.5 Flash"
+          input_cost_per_1m: 0.15
+          output_cost_per_1m: 0.6
+        - id: "gemini-2.5-pro"
+          name: "Gemini 2.5 Pro"
+          input_cost_per_1m: 1.25
+          output_cost_per_1m: 10.0
+        - id: "gemini-2.0-flash"
+          name: "Gemini 2.0 Flash"
+          input_cost_per_1m: 0.1
+          output_cost_per_1m: 0.4
+
+    moonshot:
+      api_key: "${MOONSHOT_API_KEY}"
+      base_url: "https://api.moonshot.cn/v1"
+      models:
+        - id: "kimi-k2.5"
+          name: "Kimi K2.5"
+          input_cost_per_1m: 0.6
+          output_cost_per_1m: 3.0
+
+    deepseek:
+      api_key: "${DEEPSEEK_API_KEY}"
+      base_url: "https://api.deepseek.com/v1"
+      models:
+        - id: "deepseek-chat"
+          name: "DeepSeek V3"
+          input_cost_per_1m: 0.27
+          output_cost_per_1m: 1.1
+
+    qianwen:
+      api_key: "${QIANWEN_API_KEY}"
+      base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      models:
+        - id: "qwen-plus"
+          name: "Qwen Plus"
+          input_cost_per_1m: 0.8
+          output_cost_per_1m: 2.0
+
+  # Task-based model routing
   conversation:
     primary:
-      provider: "qianwen"
-      model: "qwen-plus"
+      provider: "anthropic"
+      model: "claude-sonnet-4-5-20250929"
       max_tokens: 2048
-      temperature: 1.3
+      temperature: 0.9
     fallback:
-      provider: "qianwen"
-      model: "qwen-plus"
+      provider: "google"
+      model: "gemini-2.5-flash"
       max_tokens: 1024
       temperature: 0.8
     budget:
-      provider: "qianwen"
-      model: "qwen-plus"
+      provider: "openai"
+      model: "gpt-4o-mini"
       max_tokens: 1024
       temperature: 0.8
 
-  # Tool execution (accuracy matters)
   tool_use:
     primary:
-      provider: "qianwen"
-      model: "qwen-plus"
+      provider: "anthropic"
+      model: "claude-sonnet-4-5-20250929"
       max_tokens: 512
       temperature: 0.3
     fallback:
-      provider: "qianwen"
-      model: "qwen-plus"
+      provider: "openai"
+      model: "gpt-4o-mini"
       max_tokens: 512
       temperature: 0.3
 
-  # Summarization / memory (batch, cost-sensitive)
   summarization:
     primary:
-      provider: "qianwen"
-      model: "qwen-plus"
+      provider: "google"
+      model: "gemini-2.5-flash"
       max_tokens: 2048
       temperature: 0.5
 
+  # Routing modes
+  routing:
+    conversation:
+      primary: "claude-sonnet-4-5-20250929"
+      fallback: "gemini-2.5-flash"
+      budget: "gpt-4o-mini"
+    tool_use:
+      primary: "claude-sonnet-4-5-20250929"
+      fallback: "gpt-4o-mini"
+    vision:
+      primary: "gemini-2.0-flash"
+    summarization:
+      primary: "gemini-2.5-flash"
+
   # Current active mode: "quality" | "balanced" | "budget"
-  active_mode: "budget"
+  active_mode: "balanced"
+
+  modes:
+    quality:
+      conversation: "primary"
+      tool_use: "primary"
+    balanced:
+      conversation: "fallback"
+      tool_use: "primary"
+    budget:
+      conversation: "budget"
+      tool_use: "fallback"
 
 # --- ASR (Speech Recognition) ---
 asr:
@@ -71,7 +162,7 @@ asr:
 tts:
   # Japanese TTS
   japanese:
-    engine: "cosyvoice_dashscope" # "voicevox" | "cosyvoice_dashscope" | "edge_tts"
+    engine: "cosyvoice_dashscope" # "voicevox" | "cosyvoice_dashscope"
     voicevox:
       host: "http://127.0.0.1:50021"
       speaker_id: 3  # ずんだもん (can change to preferred voice)
@@ -84,27 +175,53 @@ tts:
       voice: "loongriko_v3"           # Japanese-friendly voice
       format: "wav"
       sample_rate: 22050
-    edge_tts:
-      voice: "ja-JP-NanamiNeural"
-      rate: "+10%"
 
   # Chinese TTS
   chinese:
-    engine: "cosyvoice_dashscope"  # "cosyvoice_dashscope" | "edge_tts"
+    engine: "cosyvoice_dashscope"  # "cosyvoice_dashscope" | "voicevox"
     cosyvoice_dashscope:
       model: "cosyvoice-v3-flash"
       voice: "longxiaochun_v2"        # Chinese voice
       format: "wav"
       sample_rate: 22050
-    edge_tts:
-      voice: "zh-CN-XiaoxiaoNeural"
-      rate: "+5%"
 
   # Active language for TTS output
   active_language: "japanese"
 
+  # VOICEVOX emotion-driven style mapping
+  voicevox_emotion_map:
+    neutral:
+      speaker_id: 3
+      speed: 1.0
+      pitch: 0
+    happy:
+      speaker_id: 3
+      speed: 1.1
+      pitch: 0.05
+    excited:
+      speaker_id: 3
+      speed: 1.2
+      pitch: 0.1
+    thinking:
+      speaker_id: 3
+      speed: 0.9
+      pitch: -0.02
+    surprised:
+      speaker_id: 3
+      speed: 1.15
+      pitch: 0.08
+    sleepy:
+      speaker_id: 3
+      speed: 0.8
+      pitch: -0.05
+    worried:
+      speaker_id: 3
+      speed: 0.95
+      pitch: -0.03
+
 # --- Audio ---
 audio:
+  input_mode: "auto_vad"  # "push_to_talk" | "auto_vad" | "wake_word"
   input:
     device_index:       # null = default mic
     sample_rate: 16000
@@ -117,12 +234,12 @@ audio:
     engine: "webrtc"  # "webrtc" (lightweight) | "silero" (ML-based, more accurate)
     mode: 3  # WebRTC VAD aggressiveness (0-3), ignored for silero
     frame_duration_ms: 30
-    silence_threshold_ms: 800  # Silence duration to end utterance
+    silence_threshold_ms: 1500  # Silence duration to end utterance
     silero_threshold: 0.5  # Silero confidence threshold (0.0-1.0)
   wake_word:
-    enabled: true
+    enabled: false  # Phase 1: disabled (use push_to_talk or auto_vad instead)
     engine: "sherpa_onnx"  # "sherpa_onnx" | "custom"
-    keyword: "ユキちゃん"
+    keyword: "ミケちゃん"
     sensitivity: 0.5
 
 # --- Speaker Recognition ---
@@ -185,8 +302,34 @@ mcp:
   - cattery_knowledge
   - check_schedule
   - generate_sns_caption
+  - draft_message
+  - get_schedule
 notion:
   customer_database_id: ""  # Fill from .env
+
+# --- Demo Mode ---
+demo:
+  enabled: false
+  safety:
+    disable_dangerous_tools: true
+    require_confirmation: false
+    max_tool_calls_per_turn: 3
+  script:
+    - step: "声紋認識"
+      prompt: "おはよう、今日の予定を教えて"
+      expected: "声紋認識 → オーナー口調切替 → スケジュール表示"
+    - step: "ナレッジ検索"
+      prompt: "シベリアンのアレルギー対策について教えて"
+      expected: "ナレッジベース検索 → 専門的回答 → emotion=interested"
+    - step: "打断テスト"
+      prompt: "あ、ちょっと待って"
+      expected: "即座に停止 → 新しい入力を待機"
+    - step: "ツール呼出"
+      prompt: "メモして、来週の火曜日にブリーダーに連絡する"
+      expected: "memo tool実行 → 保存確認 → emotion=happy"
+    - step: "声紋切替"
+      prompt: "猫を見学したいのですが"
+      expected: "声紋=unknown → フォーマル口調 → 見学案内"
 
 # --- Logging ---
 logging:
