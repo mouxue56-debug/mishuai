@@ -328,7 +328,7 @@ class FukurakuSecretary:
 
                     # 5. Send audio to frontend as base64 for playback
                     audio_b64 = base64.b64encode(audio_data).decode("ascii")
-                    # Detect format: VOICEVOX/CosyVoice output WAV (RIFF header), Edge TTS outputs MP3
+                    # Detect audio format: VOICEVOX/CosyVoice output WAV (RIFF header)
                     audio_format = "wav" if audio_data[:4] == b"RIFF" else "mp3"
                     await self.ws_server.broadcast({
                         "type": "audio",

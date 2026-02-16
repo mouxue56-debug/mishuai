@@ -22,7 +22,13 @@ CATEGORY_FILES = {
     "breed": ["breed_info.md"],
     "faq": ["cattery_faq.md"],
     "customer": ["customer_guide.md"],
-    "all": ["cattery_faq.md", "breed_info.md", "customer_guide.md"],
+    "pricing": ["pricing.md"],
+    "care": ["care_guide.md"],
+    "hospital": ["hospital_info.md"],
+    "all": [
+        "cattery_faq.md", "breed_info.md", "customer_guide.md",
+        "pricing.md", "care_guide.md", "hospital_info.md",
+    ],
 }
 
 
@@ -152,7 +158,7 @@ class CatteryKnowledgeTool(MCPTool):
         },
         "category": {
             "type": "string",
-            "enum": ["all", "breed", "faq", "customer"],
+            "enum": ["all", "breed", "faq", "customer", "pricing", "care", "hospital"],
             "description": "検索カテゴリ（デフォルト: all）",
         },
     }

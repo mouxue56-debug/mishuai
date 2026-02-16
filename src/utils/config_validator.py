@@ -60,7 +60,7 @@ class TTSVoicevoxConfig(BaseModel):
 
 
 class TTSLanguageConfig(BaseModel):
-    engine: str = "edge_tts"
+    engine: str = "cosyvoice_dashscope"
     voicevox: Optional[TTSVoicevoxConfig] = None
 
 

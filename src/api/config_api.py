@@ -43,8 +43,8 @@ _VALIDATION_RULES: dict[str, dict] = {
     "tts.japanese.voicevox.intonation_scale": {"type": "number", "min": 0.0, "max": 2.0},
     "tts.japanese.voicevox.speaker_id": {"type": "int", "min": 0, "max": 100},
     "tts.japanese.voicevox.character": {"type": "str", "options": ["zundamon", "metan"]},
-    "tts.japanese.engine": {"type": "str", "options": ["voicevox", "cosyvoice_dashscope", "edge_tts"]},
-    "tts.chinese.engine": {"type": "str", "options": ["cosyvoice_dashscope", "edge_tts"]},
+    "tts.japanese.engine": {"type": "str", "options": ["voicevox", "cosyvoice_dashscope"]},
+    "tts.chinese.engine": {"type": "str", "options": ["cosyvoice_dashscope", "voicevox"]},
     "tts.active_language": {"type": "str", "options": ["japanese", "chinese"]},
     # LLM
     "llm.active_mode": {"type": "str", "options": ["quality", "balanced", "budget"]},

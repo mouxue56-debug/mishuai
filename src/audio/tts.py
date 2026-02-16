@@ -3,7 +3,6 @@
 Converts text to speech audio using configurable engines:
 - VOICEVOX (Japanese, local, free, high quality, emotion via style switching)
 - CosyVoice v3 (DashScope API, auto-detects emotion from text context)
-- Edge TTS (multilingual, free, cloud)
 """
 
 import asyncio
@@ -70,19 +69,15 @@ class TTSEngine:
     async def initialize(self):
         """Initialize TTS engines based on config."""
         if self.active_language == "japanese":
-            engine = self.ja_config.get("engine", "voicevox")
+            engine = self.ja_config.get("engine", "cosyvoice_dashscope")
             if engine == "voicevox":
                 await self._init_voicevox()
             elif engine == "cosyvoice_dashscope":
                 self._init_cosyvoice_dashscope()
-            elif engine == "edge_tts":
-                logger.info("Edge TTS initialized (Japanese)")
         elif self.active_language == "chinese":
-            engine = self.zh_config.get("engine", "edge_tts")
+            engine = self.zh_config.get("engine", "cosyvoice_dashscope")
             if engine == "cosyvoice_dashscope":
                 self._init_cosyvoice_dashscope()
-            elif engine == "edge_tts":
-                logger.info("Edge TTS initialized (Chinese)")
 
         self._initialized = True
 
@@ -128,7 +123,7 @@ class TTSEngine:
         except Exception as e:
             logger.warning(
                 f"VOICEVOX not available: {e}. "
-                f"Start VOICEVOX or use edge_tts as fallback."
+                f"Start VOICEVOX or use cosyvoice_dashscope as fallback."
             )
 
     async def synthesize(
@@ -157,42 +152,31 @@ class TTSEngine:
             audio_data = None
 
             if lang == "japanese":
-                engine = self.ja_config.get("engine", "voicevox")
+                engine = self.ja_config.get("engine", "cosyvoice_dashscope")
                 if engine == "voicevox":
                     audio_data = await self._synthesize_voicevox(text, emotion=self._current_emotion)
                 elif engine == "cosyvoice_dashscope":
                     audio_data = await self._synthesize_cosyvoice_dashscope(text, lang)
-                else:
-                    audio_data = await self._synthesize_edge_tts(text, "ja-JP")
             elif lang == "chinese":
-                engine = self.zh_config.get("engine", "edge_tts")
+                engine = self.zh_config.get("engine", "cosyvoice_dashscope")
                 if engine == "cosyvoice_dashscope":
                     if not self._cosyvoice_ready:
                         self._init_cosyvoice_dashscope()
                     audio_data = await self._synthesize_cosyvoice_dashscope(text, lang)
-                elif engine == "edge_tts":
-                    audio_data = await self._synthesize_edge_tts(text, "zh-CN")
-                else:
-                    audio_data = await self._synthesize_edge_tts(text, "zh-CN")
-            else:
-                audio_data = await self._synthesize_edge_tts(text, "ja-JP")
 
-            # If primary engine returned empty, fallback to Edge TTS
+            # If primary engine returned empty, try the other engine
             if not audio_data:
-                logger.warning(f"Primary TTS returned empty, falling back to Edge TTS ({lang_code})")
-                audio_data = await self._synthesize_edge_tts(text, lang_code)
+                logger.warning(f"Primary TTS ({engine}) returned empty, trying fallback")
+                if engine == "voicevox":
+                    audio_data = await self._synthesize_cosyvoice_dashscope(text, lang)
+                elif engine == "cosyvoice_dashscope":
+                    audio_data = await self._synthesize_voicevox(text, emotion=self._current_emotion)
 
             return audio_data
 
         except Exception as e:
             logger.error(f"TTS synthesis error: {e}")
-            # Fallback to Edge TTS
-            try:
-                logger.info("Falling back to Edge TTS...")
-                return await self._synthesize_edge_tts(text, lang_code)
-            except Exception as e2:
-                logger.error(f"Edge TTS fallback also failed: {e2}")
-                return None
+            return None
 
     def _get_voicevox_style_id(self, emotion: str) -> int:
         """Get VOICEVOX style ID based on current emotion.
@@ -304,9 +288,8 @@ class TTSEngine:
             WAV/MP3 audio bytes, or None if failed.
         """
         if not self._cosyvoice_ready:
-            logger.warning("CosyVoice DashScope not initialized, falling back to Edge TTS")
-            lang_code = "ja-JP" if language == "japanese" else "zh-CN"
-            return await self._synthesize_edge_tts(text, lang_code)
+            logger.warning("CosyVoice DashScope not initialized")
+            return None
 
         # Get config from the active language section
         if language == "japanese":
@@ -360,7 +343,7 @@ class TTSEngine:
         """Switch TTS engine at runtime.
 
         Args:
-            engine: Engine name - "voicevox", "cosyvoice_dashscope", or "edge_tts"
+            engine: Engine name - "voicevox" or "cosyvoice_dashscope"
         """
         if self.active_language == "japanese":
             self.ja_config["engine"] = engine
@@ -376,51 +359,10 @@ class TTSEngine:
     def get_engine(self) -> str:
         """Get the currently active TTS engine name."""
         if self.active_language == "japanese":
-            return self.ja_config.get("engine", "voicevox")
+            return self.ja_config.get("engine", "cosyvoice_dashscope")
         elif self.active_language == "chinese":
-            return self.zh_config.get("engine", "edge_tts")
-        return "edge_tts"
-
-    async def _synthesize_edge_tts(self, text: str, lang_code: str) -> Optional[bytes]:
-        """Synthesize using Microsoft Edge TTS (free, cloud-based).
-
-        Args:
-            text: Text to synthesize.
-            lang_code: Language code prefix (e.g., "ja-JP", "zh-CN").
-        """
-        try:
-            import edge_tts
-        except ImportError:
-            logger.error("edge-tts not installed. Run: pip install edge-tts")
-            return None
-
-        # Select voice based on language
-        if lang_code.startswith("ja"):
-            config = self.ja_config.get("edge_tts", {})
-            voice = config.get("voice", "ja-JP-NanamiNeural")
-            rate = config.get("rate", "+10%")
-        elif lang_code.startswith("zh"):
-            config = self.zh_config.get("edge_tts", {})
-            voice = config.get("voice", "zh-CN-XiaoxiaoNeural")
-            rate = config.get("rate", "+5%")
-        else:
-            voice = "ja-JP-NanamiNeural"
-            rate = "+10%"
-
-        communicate = edge_tts.Communicate(text, voice, rate=rate)
-
-        # Collect audio data
-        audio_chunks = []
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_chunks.append(chunk["data"])
-
-        if audio_chunks:
-            audio_data = b"".join(audio_chunks)
-            logger.debug(f"Edge TTS synthesis OK: {len(audio_data)} bytes, voice={voice}")
-            return audio_data
-
-        return None
+            return self.zh_config.get("engine", "cosyvoice_dashscope")
+        return "cosyvoice_dashscope"
 
     async def get_audio_for_lip_sync(self, audio_data: bytes) -> list[float]:
         """Extract volume levels from audio for lip sync animation.
