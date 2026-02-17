@@ -75,13 +75,15 @@ class WSClient {
     }
 
     /**
-     * Send text input from the chat box.
+     * Send text input from the chat box or external sources.
      * @param {string} text - User's text message.
+     * @param {string} source - Input source: 'chat' (can interrupt) | 'danmaku' (never interrupts).
      */
-    sendTextInput(text) {
+    sendTextInput(text, source = 'chat') {
         this.send({
             type: 'text_input',
             text: text,
+            source: source,
         });
     }
 
@@ -137,14 +139,27 @@ class WSClient {
     _tryReconnect() {
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
             console.log('[WS] Max reconnect attempts reached');
+            this._emit('max_reconnect', {});
             return;
         }
 
         this.reconnectAttempts++;
-        console.log(`[WS] Reconnecting in ${this.reconnectInterval}ms (attempt ${this.reconnectAttempts})...`);
+
+        // Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 30s
+        // (py-xiaozhi inspired reconnection pattern)
+        const baseDelay = this.reconnectInterval;
+        const expDelay = Math.min(
+            baseDelay * Math.pow(2, this.reconnectAttempts - 1),
+            30000
+        );
+        // Add jitter (±10%) to avoid thundering herd
+        const jitter = expDelay * 0.1 * (Math.random() * 2 - 1);
+        const delay = Math.round(expDelay + jitter);
+
+        console.log(`[WS] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}, backoff=${expDelay}ms)...`);
 
         setTimeout(() => {
             this.connect();
-        }, this.reconnectInterval);
+        }, delay);
     }
 }

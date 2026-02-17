@@ -85,17 +85,38 @@ class SpeakerIdentifier:
             )
 
     def _load_3d_speaker(self):
-        """Load 3D-Speaker model via modelscope."""
+        """Load 3D-Speaker model via modelscope.
+
+        Uses CAM++ (Channel Attention Module++) from 3D-Speaker for better
+        speaker verification accuracy. CAM++ produces 512-dim embeddings
+        with better noise robustness than the older ERes2Net model.
+
+        Model hierarchy (best → fastest):
+        - iic/speech_campplus_sv_zh-cn_16k-common (CAM++, best accuracy)
+        - iic/speech_eres2net_sv_zh-cn_16k-common (ERes2Net, fallback)
+
+        Upgrade from ERes2Net to CAM++: existing speaker embeddings will
+        need to be re-enrolled since embedding dimensions may differ.
+        """
         global _modelscope_pipeline
         try:
             from modelscope.pipelines import pipeline as ms_pipeline
             if _modelscope_pipeline is None:
-                _modelscope_pipeline = ms_pipeline(
-                    task='speaker-verification',
-                    model='iic/speech_eres2net_sv_zh-cn_16k-common',
-                )
+                # Try CAM++ first (best accuracy), fall back to ERes2Net
+                try:
+                    _modelscope_pipeline = ms_pipeline(
+                        task='speaker-verification',
+                        model='iic/speech_campplus_sv_zh-cn_16k-common',
+                    )
+                    logger.info("Speaker ID model loaded: 3D-Speaker (CAM++)")
+                except Exception as cam_err:
+                    logger.warning(f"CAM++ model unavailable ({cam_err}), falling back to ERes2Net")
+                    _modelscope_pipeline = ms_pipeline(
+                        task='speaker-verification',
+                        model='iic/speech_eres2net_sv_zh-cn_16k-common',
+                    )
+                    logger.info("Speaker ID model loaded: 3D-Speaker (ERes2Net fallback)")
             self._encoder = _modelscope_pipeline
-            logger.info("Speaker ID model loaded: 3D-Speaker (ERes2Net)")
         except ImportError:
             raise ImportError(
                 "modelscope not installed. Run: pip install modelscope"
@@ -204,10 +225,23 @@ class SpeakerIdentifier:
             return None
 
     def _embed_3d_speaker(self, audio_array: np.ndarray) -> Optional[np.ndarray]:
-        """Extract embedding using 3D-Speaker / modelscope."""
+        """Extract embedding using 3D-Speaker / modelscope.
+
+        CAM++ pipeline requires a list of two audio arrays (speaker-verification
+        task). We pass the same audio twice and extract the first embedding.
+        """
         try:
-            result = self._encoder(audio_array)
-            return np.array(result['spk_embedding'])
+            # speaker-verification pipeline needs a list of 2 audio arrays;
+            # pass same audio twice, then take the first embedding.
+            result = self._encoder([audio_array, audio_array], output_emb=True)
+            embs = result.get('embs')
+            if embs is not None and len(embs) > 0:
+                return np.array(embs[0])
+            # Fallback: older API might use 'spk_embedding'
+            if 'spk_embedding' in result:
+                return np.array(result['spk_embedding'])
+            logger.error(f"3D-Speaker: unexpected result keys: {list(result.keys())}")
+            return None
         except Exception as e:
             logger.error(f"3D-Speaker embedding error: {e}")
             return None

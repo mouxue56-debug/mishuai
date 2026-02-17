@@ -30,6 +30,8 @@ class InterruptHandler:
         self._interrupt_event = asyncio.Event()
         self._on_interrupt_callbacks: list[Callable] = []
         self._speaking_task: Optional[asyncio.Task] = None
+        # Track current speech turn ID (like N.E.K.O's speech_id pattern)
+        self.current_speech_id: Optional[str] = None
 
     @property
     def is_speaking(self) -> bool:

@@ -435,8 +435,285 @@ class DialoguePipeline:
 
         return results
 
+    async def process_text_input_stream(
+        self,
+        text: str,
+        speaker_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        intent: str = "chat",
+        session_id: Optional[str] = None,
+    ):
+        """Process text input with streaming LLM output.
+
+        Yields partial results as they arrive from the LLM, enabling
+        sentence-level TTS synthesis (Pipecat-inspired streaming pipeline).
+
+        Yields:
+            dict with keys:
+            - "type": "sentence" | "final"
+            - "sentence": extracted sentence text (for "sentence" type)
+            - "full_text": accumulated text so far
+            - "emotion": detected emotion (may be "neutral" until JSON parsed)
+            - "turn": TurnContext
+            - "tool_calls": list (only in "final")
+        """
+        from src.utils.sentence_splitter import SentenceSplitter, extract_json_text_and_emotion
+
+        if not request_id:
+            request_id = str(uuid.uuid4())[:8]
+
+        # --- Session management ---
+        if speaker_id and not session_id:
+            session_id = await self.get_or_create_session(speaker_id)
+
+        # --- Build TurnContext ---
+        speaker_profile = self._get_speaker_profile(speaker_id)
+        turn = TurnContext(
+            request_id=request_id,
+            intent=intent,
+            input_text=text,
+            speaker_id=speaker_id,
+            session_id=session_id,
+            speaker_profile=speaker_profile,
+        )
+
+        logger.info(f"[{request_id}] Stream processing: '{text[:50]}' (speaker={speaker_id})")
+        self.interrupt.set_state(PipelineState.PROCESSING)
+        await self._broadcast_to_frontend({"type": "status", "status": "processing"})
+
+        self._current_speaker_id = speaker_id
+        self._current_speaker_profile = speaker_profile
+
+        # --- Per-speaker isolated memory ---
+        speaker_mem = self._get_speaker_memory(speaker_id)
+        speaker_mem.add("user", text)
+        self.memory.add_message("user", text)
+
+        # Build conversation context
+        memory_context = await self.memory.get_context_for_prompt()
+        turn.memory_context = memory_context
+
+        conversation = speaker_mem.get_context()
+        messages = []
+
+        if memory_context:
+            messages.append(LLMMessage(
+                role="user",
+                content=f"[コンテキスト情報]\n{memory_context}\n---\n以上は参考情報です。ユーザーの質問に答えてください。"
+            ))
+            messages.append(LLMMessage(role="assistant", content="はい、承知しました。"))
+
+        for m in conversation:
+            messages.append(LLMMessage(role=m["role"], content=m["content"]))
+
+        # Get emotion hints
+        emotion_hint = self.emotion.get_emotion_momentum_hint()
+        rhythm_hint = self.emotion.get_conversation_rhythm_hint(
+            speaker_mem.turn_count
+        )
+
+        # --- Stream LLM tokens ---
+        turn.llm_started_at = time.time()
+        splitter = SentenceSplitter(min_length=6, max_length=60)
+        accumulated_raw = ""  # Raw tokens from LLM (may include JSON wrapper)
+        sentences_yielded = 0
+
+        # JSON-aware streaming text extractor:
+        # LLM returns {"text": "...", "emotion": "..."} but we receive tokens
+        # incrementally. We need to detect and skip the JSON wrapper.
+        json_state = "detect"  # detect | inside_text | passthrough
+        text_key_found = False
+        inside_quotes = False
+        escape_next = False
+
+        def extract_text_from_token(token: str, raw_so_far: str) -> str:
+            """Strip JSON wrapper and extract only the 'text' value content.
+
+            States:
+            - detect: looking for {"text": " pattern → switch to inside_text
+            - inside_text: we're inside the text value, pass through
+            - passthrough: no JSON detected, pass raw tokens
+            """
+            nonlocal json_state, text_key_found, inside_quotes, escape_next
+
+            if json_state == "passthrough":
+                return token
+
+            if json_state == "detect":
+                # Check if the accumulated raw looks like JSON start
+                stripped = raw_so_far.lstrip()
+                if stripped.startswith("```json"):
+                    stripped = stripped[7:].lstrip()
+                if stripped.startswith("```"):
+                    stripped = stripped[3:].lstrip()
+
+                # Look for the text value opening
+                import re
+                # Match: {"text": " or {"text":"
+                match = re.search(r'["\']text["\']\s*:\s*["\']', stripped)
+                if match:
+                    # Found the text value — extract everything after the opening quote
+                    json_state = "inside_text"
+                    after = stripped[match.end():]
+                    return after  # Return content after {"text": "
+                elif len(stripped) > 50:
+                    # Long enough without JSON pattern — treat as plain text
+                    json_state = "passthrough"
+                    return raw_so_far
+                else:
+                    return ""  # Still detecting, don't yield anything yet
+
+            if json_state == "inside_text":
+                # We're inside the text value — pass through until closing quote
+                # Handle JSON escape sequences: \n → newline, \t → tab, etc.
+                json_escapes = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '"': '"', '/': '/'}
+                result = []
+                for ch in token:
+                    if escape_next:
+                        # Convert JSON escape to actual character
+                        result.append(json_escapes.get(ch, ch))
+                        escape_next = False
+                        continue
+                    if ch == '\\':
+                        escape_next = True
+                        continue
+                    if ch == '"':
+                        # End of text value — stop extracting
+                        json_state = "done"
+                        break
+                    result.append(ch)
+                return "".join(result)
+
+            return ""  # "done" state — no more text to extract
+
+        try:
+            async for token in self.llm.chat_stream(
+                messages, LLMTask.CONVERSATION, speaker_profile,
+                emotion_hint=emotion_hint,
+                rhythm_hint=rhythm_hint,
+            ):
+                if self.interrupt.should_stop():
+                    logger.info(f"[{request_id}] Interrupted during LLM streaming")
+                    turn.aborted = True
+                    break
+
+                accumulated_raw += token
+
+                # Extract just the text content (strip JSON wrapper in real-time)
+                text_part = extract_text_from_token(token, accumulated_raw)
+                if not text_part:
+                    continue
+
+                complete_sentences = splitter.push(text_part)
+                for sentence in complete_sentences:
+                    sentences_yielded += 1
+                    yield {
+                        "type": "sentence",
+                        "sentence": sentence,
+                        "sentence_index": sentences_yielded - 1,
+                        "full_text": accumulated_raw,
+                        "emotion": "neutral",
+                        "turn": turn,
+                    }
+
+        except Exception as e:
+            logger.error(f"[{request_id}] LLM stream error: {e}")
+            turn.error = str(e)
+
+        turn.llm_finished_at = time.time()
+
+        # Flush remaining buffer
+        remaining = splitter.flush()
+        if remaining and not turn.aborted:
+            sentences_yielded += 1
+            yield {
+                "type": "sentence",
+                "sentence": remaining,
+                "sentence_index": sentences_yielded - 1,
+                "full_text": accumulated_raw,
+                "emotion": "neutral",
+                "turn": turn,
+            }
+
+        # --- Parse final response (extract text + emotion from JSON) ---
+        final_text, emotion = extract_json_text_and_emotion(accumulated_raw)
+
+        # Update emotion
+        turn.emotion = emotion
+        self.emotion.update_emotion(emotion)
+        await self._broadcast_to_frontend(self.emotion.get_emotion_for_frontend())
+
+        # Build LLMResponse for compatibility
+        response = LLMResponse(
+            text=final_text,
+            emotion=emotion,
+            model=self.llm._get_model_config(LLMTask.CONVERSATION).get("model", ""),
+        )
+        turn.llm_response = response
+        turn.response_text = final_text
+
+        # Check for tool calls in the full response
+        parsed = self.llm._parse_response(accumulated_raw, response.model)
+        if parsed.tool_calls:
+            response.tool_calls = parsed.tool_calls
+
+        # Handle tool calls (non-streaming, as tools need full execution)
+        if response.tool_calls and not turn.aborted:
+            turn.tool_calls = response.tool_calls
+            turn.intent = "tool"
+            tool_ctx = ToolContext(
+                speaker_id=speaker_id,
+                speaker_role=speaker_profile.get("role") if speaker_profile else None,
+                language=speaker_profile.get("language", "japanese") if speaker_profile else "japanese",
+                session_id=request_id,
+            )
+            tool_results = await self._execute_tools(response.tool_calls, speaker_profile, tool_ctx)
+            turn.tool_results = tool_results
+
+            if tool_results:
+                # Re-run LLM with tool results (non-streaming for simplicity)
+                tool_context = "\n".join(
+                    f"[ツール結果: {r['name']}] {r['result']}" for r in tool_results
+                )
+                messages.append(LLMMessage(role="assistant", content=response.text))
+                messages.append(LLMMessage(
+                    role="user",
+                    content=f"ツール実行結果:\n{tool_context}\nこの結果を元に自然に返答してください。"
+                ))
+                response = await self.llm.chat(messages, LLMTask.CONVERSATION, speaker_profile)
+                turn.llm_response = response
+                turn.emotion = response.emotion
+                turn.response_text = response.text
+                self.emotion.update_emotion(response.emotion)
+
+        # --- Finalize ---
+        turn.finished_at = time.time()
+
+        # Add to memory
+        if final_text and not turn.aborted:
+            speaker_mem = self._get_speaker_memory(speaker_id)
+            speaker_mem.add("assistant", final_text)
+            self.memory.add_message("assistant", final_text)
+            await self.memory.maybe_extract_preferences(request_id)
+
+        # Yield final result
+        yield {
+            "type": "final",
+            "response": response,
+            "turn": turn,
+            "full_text": final_text,
+            "emotion": emotion,
+            "tool_calls": response.tool_calls if response.tool_calls else [],
+        }
+
+        logger.info(f"[{request_id}] Response: '{final_text[:50]}' (emotion={emotion})")
+        logger.info(f"Turn: {turn.summary()}")
+
     async def run(self):
-        """Main pipeline loop - processes items from the input queue."""
+        """Main pipeline loop - processes items from the input queue.
+
+        Routes to streaming or non-streaming based on the item's 'stream' flag.
+        """
         self._running = True
         logger.info("Pipeline running - waiting for input...")
 
@@ -448,19 +725,33 @@ class DialoguePipeline:
                 if item.get("type") == "text":
                     request_id = item.get("request_id", str(uuid.uuid4())[:8])
                     intent = item.get("intent", "chat")
-                    response, turn = await self.process_text_input(
-                        item["text"],
-                        item.get("speaker_id"),
-                        request_id,
-                        intent=intent,
-                        session_id=item.get("session_id"),
-                    )
-                    await self.output_queue.put({
-                        "type": "response",
-                        "request_id": request_id,
-                        "response": response,
-                        "turn": turn,
-                    })
+                    use_stream = item.get("stream", True)
+
+                    if use_stream and intent in ("chat", "proactive"):
+                        # Streaming path: yield sentences to output queue
+                        await self.output_queue.put({
+                            "type": "stream_start",
+                            "request_id": request_id,
+                            "text": item["text"],
+                            "speaker_id": item.get("speaker_id"),
+                            "session_id": item.get("session_id"),
+                            "intent": intent,
+                        })
+                    else:
+                        # Non-streaming path (tools, enrollment, etc.)
+                        response, turn = await self.process_text_input(
+                            item["text"],
+                            item.get("speaker_id"),
+                            request_id,
+                            intent=intent,
+                            session_id=item.get("session_id"),
+                        )
+                        await self.output_queue.put({
+                            "type": "response",
+                            "request_id": request_id,
+                            "response": response,
+                            "turn": turn,
+                        })
 
             except asyncio.TimeoutError:
                 continue

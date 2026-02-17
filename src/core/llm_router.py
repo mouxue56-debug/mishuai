@@ -652,16 +652,95 @@ class LLMRouter:
         messages: list[LLMMessage],
         task: LLMTask = LLMTask.CONVERSATION,
         speaker_profile: dict | None = None,
+        emotion_hint: str = "",
+        rhythm_hint: str = "",
     ) -> AsyncIterator[str]:
-        """Stream a chat response token by token.
+        """Stream a chat response token by token using real OpenAI streaming.
 
-        Currently falls back to non-streaming. Full streaming to be implemented
-        per-provider for lower latency.
+        Yields raw text chunks as they arrive from the LLM. The caller is
+        responsible for accumulating text and extracting JSON/emotion after
+        the stream completes.
+
+        Pipecat-inspired: low-latency token delivery enables sentence-level
+        TTS synthesis while the LLM is still generating.
+
+        Falls back to non-streaming + simulated chunks for non-OpenAI providers.
         """
-        response = await self.chat(messages, task, speaker_profile)
-        # Simulate streaming by yielding chunks
+        model_config = self._get_model_config(task)
+        provider = LLMProvider(model_config.get("provider", "google"))
+
+        # Build system prompt
+        system_prompt = self._build_system_prompt(
+            speaker_profile,
+            emotion_hint=emotion_hint,
+            rhythm_hint=rhythm_hint,
+        )
+
+        api_messages = [{"role": "system", "content": system_prompt}]
+        for msg in messages:
+            api_messages.append({"role": msg.role, "content": msg.content})
+
+        logger.info(f"LLM stream request: provider={provider.value}, model={model_config.get('model')}")
+
+        # Real streaming for OpenAI-compatible providers (qianwen, openai, moonshot, deepseek)
+        if provider in (LLMProvider.QIANWEN, LLMProvider.OPENAI,
+                        LLMProvider.MOONSHOT, LLMProvider.DEEPSEEK):
+            try:
+                async for chunk in self._stream_openai_compatible(
+                    api_messages, model_config, provider.value
+                ):
+                    yield chunk
+                return
+            except Exception as e:
+                logger.error(f"LLM stream error ({provider.value}): {e}")
+                # Fall through to non-streaming fallback
+
+        # Fallback: non-streaming + simulated chunks
+        response = await self.chat(
+            messages, task, speaker_profile,
+            emotion_hint=emotion_hint,
+            rhythm_hint=rhythm_hint,
+        )
         chunk_size = 10
         text = response.text
         for i in range(0, len(text), chunk_size):
             yield text[i:i + chunk_size]
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.01)
+
+    async def _stream_openai_compatible(
+        self, messages: list[dict], model_config: dict, provider: str
+    ) -> AsyncIterator[str]:
+        """Stream from OpenAI-compatible API (DashScope, OpenAI, etc.).
+
+        Uses stream=True with the OpenAI client to yield text deltas
+        as they arrive. This is the key to low-latency first-token delivery.
+        """
+        try:
+            import openai
+        except ImportError:
+            raise ImportError("openai package not installed")
+
+        base_urls = {
+            "openai": "https://api.openai.com/v1",
+            "moonshot": "https://api.moonshot.cn/v1",
+            "deepseek": "https://api.deepseek.com/v1",
+            "qianwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        }
+
+        api_key = get_api_key(provider)
+        client = openai.AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_urls.get(provider, base_urls["openai"]),
+        )
+
+        stream = await client.chat.completions.create(
+            model=model_config.get("model", "qwen-plus"),
+            messages=messages,
+            max_tokens=model_config.get("max_tokens", 1024),
+            temperature=model_config.get("temperature", 0.8),
+            stream=True,
+        )
+
+        async for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content

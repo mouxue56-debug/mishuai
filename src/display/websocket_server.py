@@ -193,12 +193,13 @@ class WebSocketServer:
 
         if msg_type == "text_input":
             text = message.get("text", "")
+            source = message.get("source", "chat")  # 'chat' | 'danmaku'
             if text and self._on_text_input:
-                logger.debug(f"Text input from frontend: '{text[:50]}'")
+                logger.debug(f"Text input from frontend: '{text[:50]}' (source={source})")
                 if asyncio.iscoroutinefunction(self._on_text_input):
-                    await self._on_text_input(text, websocket)
+                    await self._on_text_input(text, websocket, source=source)
                 else:
-                    self._on_text_input(text, websocket)
+                    self._on_text_input(text, websocket, source=source)
 
         elif msg_type == "command":
             command = message.get("command", "")

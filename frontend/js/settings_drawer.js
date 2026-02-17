@@ -165,7 +165,6 @@ class SettingsDrawer {
         panel.appendChild(this._createSelectFull('tts-engine', '引擎', [
             { value: 'voicevox', label: 'VOICEVOX（情感风格）' },
             { value: 'cosyvoice_dashscope', label: 'CosyVoice v3（自动情感）' },
-            { value: 'edge_tts', label: 'Edge TTS（轻量）' },
         ], (val) => {
             this._applyChange('tts.japanese', 'engine', val);
             this._updateVoicevoxVisibility(val);
@@ -1001,6 +1000,13 @@ class SettingsDrawer {
             '启用详细日志输出', false,
             (val) => this._applyChange('app', 'debug', val)));
 
+        panel.appendChild(this._createSectionTitle('主动功能'));
+
+        // Proactive scheduler toggle
+        panel.appendChild(this._createToggleRow('proactive-enabled', '主动应答',
+            '关闭后待机不消耗 API，只在你说话时才回应', true,
+            (val) => this._applyChange('proactive', 'enabled', val)));
+
         // Version info
         panel.appendChild(this._createSectionTitle('信息'));
 
@@ -1626,6 +1632,7 @@ class SettingsDrawer {
         // --- System tab ---
         this._setSelect('log-level', c.logging?.level || 'INFO');
         this._setToggle('debug-mode', c.app?.debug === true);
+        this._setToggle('proactive-enabled', c.proactive?.enabled !== false);
 
         const versionEl = document.getElementById('version-info');
         if (versionEl && c.app?.version) {

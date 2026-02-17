@@ -422,7 +422,10 @@ class ConfigAPI:
             key = full_path.split(".")[-1]
             if hasattr(self._scheduler, key):
                 setattr(self._scheduler, key, value)
-                logger.info(f"Runtime: Proactive {key} → {value}")
+                if key == "enabled":
+                    logger.info(f"Runtime: Proactive scheduler {'ON' if value else 'OFF'}")
+                else:
+                    logger.info(f"Runtime: Proactive {key} → {value}")
 
         # --- Vision ---
         elif full_path == "vision.enabled" and self._vision:

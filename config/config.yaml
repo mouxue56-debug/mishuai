@@ -17,7 +17,7 @@ llm:
       provider: "qianwen"
       model: "qwen-plus"
       max_tokens: 2048
-      temperature: 1.3
+      temperature: 2
     fallback:
       provider: "qianwen"
       model: "qwen-plus"
@@ -81,7 +81,7 @@ tts:
       intonation_scale: 1.2
     cosyvoice_dashscope:
       model: "cosyvoice-v3-flash"     # "cosyvoice-v3-flash" (fast) | "cosyvoice-v2-0.5b" (quality)
-      voice: "loongriko_v3"           # Japanese-friendly voice
+      voice: "loongtomoka_v3"         # Tomoka: mature Japanese female (30-35)
       format: "wav"
       sample_rate: 22050
     edge_tts:
@@ -90,18 +90,15 @@ tts:
 
   # Chinese TTS
   chinese:
-    engine: "cosyvoice_dashscope"  # "cosyvoice_dashscope" | "edge_tts"
+    engine: "cosyvoice_dashscope"
     cosyvoice_dashscope:
       model: "cosyvoice-v3-flash"
-      voice: "longxiaochun_v2"        # Chinese voice
+      voice: "longanhuan"             # 安欢: social companion female (20-30), supports emotion instruct
       format: "wav"
       sample_rate: 22050
-    edge_tts:
-      voice: "zh-CN-XiaoxiaoNeural"
-      rate: "+5%"
 
   # Active language for TTS output
-  active_language: "japanese"
+  active_language: "chinese"
 
 # --- Audio ---
 audio:
@@ -128,8 +125,8 @@ audio:
 # --- Speaker Recognition ---
 speaker:
   enabled: true
-  engine: "resemblyzer"  # "resemblyzer" (lightweight) | "3d_speaker" (accurate)
-  similarity_threshold: 0.5
+  engine: "3d_speaker"  # "3d_speaker" (CAM++, accurate) | "resemblyzer" (lightweight)
+  similarity_threshold: 0.45  # CAM++ embeddings use different scale; lower threshold is typical
   sample_rate: 16000
   profiles_path: "config/speaker_profiles.yaml"
 
@@ -148,7 +145,7 @@ vision:
 
 # --- Proactive Scheduler ---
 proactive:
-  enabled: true
+  enabled: false
   idle_timeout_min: 15       # (Legacy) Minutes before idle chatter
   idle_min_sec: 60           # Min random idle interval (1 min)
   idle_max_sec: 300          # Max random idle interval (5 min)

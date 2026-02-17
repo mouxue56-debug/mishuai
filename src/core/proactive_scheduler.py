@@ -80,10 +80,6 @@ class ProactiveScheduler:
 
     async def start(self):
         """Start the scheduler loop."""
-        if not self.enabled:
-            logger.info("Proactive scheduler disabled")
-            return
-
         self._running = True
         logger.info(f"Proactive scheduler started (idle={self.idle_timeout_min}min, "
                      f"cooldown={self._cooldown_sec}s)")
@@ -107,6 +103,8 @@ class ProactiveScheduler:
 
     async def _check_triggers(self):
         """Evaluate all trigger conditions."""
+        if not self.enabled:
+            return
         now = time.time()
 
         # Cooldown: don't spam proactive messages

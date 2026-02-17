@@ -30,8 +30,8 @@
             <span id="emotion-badge">😊 neutral</span>
         </div>
 
-        <!-- Subtitle Area -->
-        <div id="subtitle-area">
+        <!-- Subtitle Area (click to interrupt AI speech) -->
+        <div id="subtitle-area" onclick="if(isAISpeaking){interruptAudio();wsClient.sendCommand('interrupt',{});}" style="cursor:pointer;">
             <div id="subtitle-text"></div>
         </div>
 

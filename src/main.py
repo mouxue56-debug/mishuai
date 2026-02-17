@@ -94,6 +94,19 @@ class FukurakuSecretary:
 
         self._running = False
 
+        # Error recovery components (py-xiaozhi inspired)
+        from src.utils.error_recovery import (
+            SilencePeriod, CircuitBreaker, TaskLifecycle
+        )
+        self._silence_period = SilencePeriod(duration_ms=250)  # Anti-echo after TTS
+        self._tts_circuit = CircuitBreaker(
+            failure_threshold=3, cooldown_sec=30, name="tts"
+        )
+        self._llm_circuit = CircuitBreaker(
+            failure_threshold=3, cooldown_sec=60, name="llm"
+        )
+        self._task_lifecycle = TaskLifecycle()
+
         # Voice enrollment state
         self._enrollment_mode = False
         self._enrollment_speaker_id = None   # who is being enrolled (new person)
@@ -208,6 +221,9 @@ class FukurakuSecretary:
         logger.info("Shutting down...")
         self._running = False
 
+        # Cancel all tracked tasks first (py-xiaozhi lifecycle pattern)
+        await self._task_lifecycle.shutdown(timeout=3.0)
+
         if self.microphone:
             await self.microphone.stop()
 
@@ -271,10 +287,20 @@ class FukurakuSecretary:
     # ----------------------------------------------------------------
 
     async def _output_consumer(self):
-        """Unified output consumer - handles all assistant responses.
+        """Unified output consumer - handles both streaming and legacy responses.
 
-        Receives (response, turn) from pipeline and delivers TTS + WebSocket.
-        Populates TurnContext with TTS timing, audio size, and delivery info.
+        Two paths:
+        1. stream_start: Streaming pipeline (Pipecat-inspired)
+           - LLM streams tokens → sentence splitter → TTS per sentence → audio chunks
+           - First audio plays in <1s while LLM/TTS continue in background
+        2. response: Legacy non-streaming (enrollment, tools, reminders)
+           - Full response → single TTS → single audio delivery
+
+        Key design (N.E.K.O speech_id + Pipecat streaming):
+        - Each speech turn gets a unique speech_id
+        - Multiple audio chunks share the same speech_id
+        - Frontend queues audio chunks for gapless playback
+        - Interruption cancels remaining sentences
         """
         import time as _time
 
@@ -284,112 +310,360 @@ class FukurakuSecretary:
                     self.pipeline.output_queue.get(), timeout=1.0
                 )
 
-                if result.get("type") != "response":
-                    continue
+                result_type = result.get("type")
 
-                response = result.get("response")
-                request_id = result.get("request_id", "?")
-                turn = result.get("turn")  # TurnContext (may be None for reminders)
-
-                if not response or not response.text:
-                    continue
-
-                logger.info(f"[{request_id}] Output consumer: delivering response")
-
-                # Notify scheduler that interaction occurred
-                self.scheduler.notify_interaction()
-
-                # 1. Set SPEAKING state + start echo suppression
-                self.pipeline.interrupt.set_state(PipelineState.SPEAKING)
-                self.pipeline.interrupt.clear_interrupt()
-                if self.microphone:
-                    self.microphone.suppress_echo()
-
-                # 2. Notify frontend: speech starting
-                await self.ws_server.send_speech_start(response.text, response.emotion)
-                await self.ws_server.send_subtitle(response.text, "assistant")
-                await self.ws_server.send_status("speaking")
-
-                # 3. Synthesize TTS audio (with emotion for VOICEVOX style switching)
-                tts_start = _time.time()
-                audio_data = await self.tts.synthesize(response.text, emotion=response.emotion)
-                tts_end = _time.time()
-
-                # Populate TurnContext with TTS info
-                if turn:
-                    turn.tts_started_at = tts_start
-                    turn.tts_finished_at = tts_end
-                    turn.tts_engine = self.tts.get_engine()
-
-                if audio_data and not self.pipeline.interrupt.should_stop():
-                    # 4. Extract lip sync data (legacy, frontend now uses real-time)
-                    volumes = await self.tts.get_audio_for_lip_sync(audio_data)
-                    await self.ws_server.send_lip_sync(volumes)
-
-                    # 5. Send audio to frontend as base64 for playback
-                    audio_b64 = base64.b64encode(audio_data).decode("ascii")
-                    # Detect format: VOICEVOX/CosyVoice output WAV (RIFF header), Edge TTS outputs MP3
-                    audio_format = "wav" if audio_data[:4] == b"RIFF" else "mp3"
-                    await self.ws_server.broadcast({
-                        "type": "audio",
-                        "data": audio_b64,
-                        "format": audio_format,
-                        "request_id": request_id,
-                    })
-
-                    # Populate TurnContext with audio delivery info
-                    if turn:
-                        turn.audio_bytes = len(audio_data)
-                        turn.audio_format = audio_format
-
-                    # 6. Wait for approximate playback duration
-                    # WAV: ~48000 bytes/sec (24kHz 16-bit mono)
-                    # MP3: compressed ~4x, so ~12000 bytes/sec
-                    bytes_per_sec = 48000 if audio_format == "wav" else 12000
-                    duration_sec = max(len(audio_data) / bytes_per_sec, 0.5)
-
-                    if turn:
-                        turn.audio_duration_sec = duration_sec
-
-                    try:
-                        interrupted = await self.pipeline.interrupt.wait_for_interrupt(
-                            timeout=duration_sec
-                        )
-                        if interrupted:
-                            logger.info(f"[{request_id}] Speech interrupted by user")
-                            if turn:
-                                turn.aborted = True
-                    except asyncio.CancelledError:
-                        pass
-
-                # 7. Speech ended — finalize turn & save to turn_logs
-                if turn:
-                    turn.finished_at = _time.time()
-                    logger.info(f"Turn complete: {turn.summary()}")
-                    # Persist TurnContext to SQLite for analytics
-                    try:
-                        await self.pipeline.memory.long_term.save_turn_log(turn)
-                    except Exception as log_err:
-                        logger.warning(f"Failed to save turn log: {log_err}")
-
-                await self.ws_server.send_speech_end()
-                await self.ws_server.send_status("idle")
-                self.pipeline.interrupt.set_state(PipelineState.IDLE)
-                self.pipeline.interrupt.clear_interrupt()
-
-                # Unmute mic (resume listening)
-                if self.microphone:
-                    self.microphone.stop_suppress()
+                if result_type == "stream_start":
+                    await self._handle_streaming_output(result)
+                elif result_type == "response":
+                    await self._handle_legacy_output(result)
 
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
                 logger.error(f"Output consumer error: {e}")
                 self.pipeline.interrupt.set_state(PipelineState.IDLE)
-                # Make sure mic is unmuted on error
+                self.pipeline.interrupt.current_speech_id = None
                 if self.microphone:
                     self.microphone.stop_suppress()
                 continue
+
+    async def _handle_streaming_output(self, result: dict):
+        """Handle streaming pipeline output (Pipecat-inspired).
+
+        Flow:
+        1. Start streaming LLM → sentence splitter
+        2. For each complete sentence:
+           a. Synthesize TTS for that sentence
+           b. Send audio_chunk to frontend (queued playback)
+           c. Continue LLM streaming in parallel
+        3. After all sentences delivered, wait for playback to finish
+        4. Send speech_end
+        """
+        import time as _time
+
+        request_id = result.get("request_id", "?")
+        speech_id = f"sp-{str(uuid.uuid4())[:8]}"
+
+        logger.info(f"[{request_id}] Streaming output (speech_id={speech_id})")
+
+        # Notify scheduler
+        self.scheduler.notify_interaction()
+
+        # Set SPEAKING state
+        self.pipeline.interrupt.set_state(PipelineState.SPEAKING)
+        self.pipeline.interrupt.clear_interrupt()
+        self.pipeline.interrupt.current_speech_id = speech_id
+        if self.microphone:
+            self.microphone.suppress_echo()
+
+        # Notify frontend: speech starting (streaming mode)
+        await self.ws_server.broadcast({
+            "type": "speech_start",
+            "text": "",
+            "emotion": "neutral",
+            "speech_id": speech_id,
+            "streaming": True,
+        })
+        await self.ws_server.send_status("speaking")
+
+        # Run the streaming pipeline
+        total_duration = 0.0
+        total_bytes = 0
+        audio_format = "wav"
+        turn = None
+        full_text = ""
+        emotion = "neutral"
+        sentences_sent = 0
+
+        try:
+            async for chunk in self.pipeline.process_text_input_stream(
+                text=result.get("text", ""),
+                speaker_id=result.get("speaker_id"),
+                request_id=request_id,
+                intent=result.get("intent", "chat"),
+                session_id=result.get("session_id"),
+            ):
+                if chunk["type"] == "sentence":
+                    sentence = chunk["sentence"]
+                    turn = chunk["turn"]
+
+                    # Check for interruption
+                    if self.pipeline.interrupt.should_stop():
+                        logger.info(f"[{request_id}] Streaming interrupted at sentence {sentences_sent}")
+                        if turn:
+                            turn.aborted = True
+                        break
+
+                    # Synthesize this sentence (streaming mode for lower latency)
+                    audio_data = await self.tts.synthesize_cosyvoice_streaming(sentence)
+
+                    if not audio_data:
+                        continue
+
+                    # Check interruption after TTS
+                    if self.pipeline.interrupt.should_stop():
+                        if turn:
+                            turn.aborted = True
+                        break
+
+                    # Send audio chunk to frontend
+                    audio_b64 = base64.b64encode(audio_data).decode("ascii")
+                    fmt = "wav" if audio_data[:4] == b"RIFF" else "mp3"
+                    audio_format = fmt
+
+                    await self.ws_server.broadcast({
+                        "type": "audio_chunk",
+                        "data": audio_b64,
+                        "format": fmt,
+                        "speech_id": speech_id,
+                        "chunk_index": sentences_sent,
+                        "sentence": sentence,
+                    })
+
+                    # Update subtitle incrementally
+                    full_text += sentence
+                    await self.ws_server.send_subtitle(full_text, "assistant")
+
+                    duration = self._calculate_audio_duration(audio_data, fmt)
+                    total_duration += duration
+                    total_bytes += len(audio_data)
+                    sentences_sent += 1
+
+                    logger.info(
+                        f"[{request_id}] Chunk {sentences_sent}: '{sentence[:30]}' "
+                        f"({len(audio_data)}b, {duration:.1f}s)"
+                    )
+
+                elif chunk["type"] == "final":
+                    turn = chunk.get("turn")
+                    full_text = chunk.get("full_text", full_text)
+                    emotion = chunk.get("emotion", "neutral")
+
+                    # Handle tool call responses (synthesize tool result)
+                    if chunk.get("tool_calls") and chunk.get("response"):
+                        tool_response = chunk["response"]
+                        if tool_response.text and tool_response.text != full_text:
+                            audio_data = await self.tts.synthesize(
+                                tool_response.text, emotion=tool_response.emotion
+                            )
+                            if audio_data and not self.pipeline.interrupt.should_stop():
+                                audio_b64 = base64.b64encode(audio_data).decode("ascii")
+                                fmt = "wav" if audio_data[:4] == b"RIFF" else "mp3"
+                                await self.ws_server.broadcast({
+                                    "type": "audio_chunk",
+                                    "data": audio_b64,
+                                    "format": fmt,
+                                    "speech_id": speech_id,
+                                    "chunk_index": sentences_sent,
+                                    "sentence": tool_response.text,
+                                })
+                                duration = self._calculate_audio_duration(audio_data, fmt)
+                                total_duration += duration
+                                total_bytes += len(audio_data)
+                                sentences_sent += 1
+                                full_text = tool_response.text
+
+                    # Update emotion on frontend
+                    await self.ws_server.broadcast({
+                        "type": "emotion",
+                        "emotion": emotion,
+                        "expression": emotion,
+                        "motion_group": "Idle",
+                    })
+
+        except Exception as e:
+            logger.error(f"[{request_id}] Streaming pipeline error: {e}")
+
+        # Send full text as chat message
+        if full_text:
+            await self.ws_server.broadcast({
+                "type": "speech_text",
+                "text": full_text,
+                "emotion": emotion,
+                "speech_id": speech_id,
+            })
+
+        # Brief pause before sending speech_end to give frontend time to
+        # enqueue the last audio chunk. Frontend now uses speechEndReceived
+        # flag to finalize only after all audio finishes playing.
+        if total_duration > 0 and not self.pipeline.interrupt.should_stop():
+            wait_time = min(total_duration * 0.15, 2.0)
+            try:
+                interrupted = await self.pipeline.interrupt.wait_for_interrupt(
+                    timeout=wait_time
+                )
+                if interrupted and turn:
+                    turn.aborted = True
+            except asyncio.CancelledError:
+                pass
+
+        # Finalize turn
+        was_interrupted = self.pipeline.interrupt.should_stop()
+        if turn:
+            turn.tts_engine = self.tts.get_engine()
+            turn.audio_bytes = total_bytes
+            turn.audio_format = audio_format
+            turn.audio_duration_sec = total_duration
+            turn.finished_at = _time.time()
+            logger.info(f"Turn complete: {turn.summary()}")
+            try:
+                await self.pipeline.memory.long_term.save_turn_log(turn)
+            except Exception as log_err:
+                logger.warning(f"Failed to save turn log: {log_err}")
+
+        # Always send speech_end (with interrupted flag if applicable)
+        await self.ws_server.broadcast({
+            "type": "speech_end",
+            "speech_id": speech_id,
+            "interrupted": was_interrupted,
+        })
+        await self.ws_server.send_status("idle")
+        self.pipeline.interrupt.set_state(PipelineState.IDLE)
+        self.pipeline.interrupt.clear_interrupt()
+        self.pipeline.interrupt.current_speech_id = None
+
+        if self.microphone:
+            self.microphone.stop_suppress()
+
+        # Start anti-echo silence period (py-xiaozhi pattern)
+        if not was_interrupted:
+            self._silence_period.start()
+
+        logger.info(
+            f"[{request_id}] Streaming complete: {sentences_sent} chunks, "
+            f"{total_bytes}b, {total_duration:.1f}s total"
+            f"{' (interrupted)' if was_interrupted else ''}"
+        )
+
+    async def _handle_legacy_output(self, result: dict):
+        """Handle legacy non-streaming output (enrollment, reminders, etc.)."""
+        import time as _time
+
+        response = result.get("response")
+        request_id = result.get("request_id", "?")
+        turn = result.get("turn")
+
+        if not response or not response.text:
+            return
+
+        speech_id = f"sp-{str(uuid.uuid4())[:8]}"
+        logger.info(f"[{request_id}] Legacy output (speech_id={speech_id})")
+
+        self.scheduler.notify_interaction()
+
+        self.pipeline.interrupt.set_state(PipelineState.SPEAKING)
+        self.pipeline.interrupt.clear_interrupt()
+        self.pipeline.interrupt.current_speech_id = speech_id
+        if self.microphone:
+            self.microphone.suppress_echo()
+
+        await self.ws_server.broadcast({
+            "type": "speech_start",
+            "text": response.text,
+            "emotion": response.emotion or "neutral",
+            "speech_id": speech_id,
+        })
+        await self.ws_server.send_subtitle(response.text, "assistant")
+        await self.ws_server.send_status("speaking")
+
+        tts_start = _time.time()
+        audio_data = await self.tts.synthesize(response.text, emotion=response.emotion)
+        tts_end = _time.time()
+
+        if turn:
+            turn.tts_started_at = tts_start
+            turn.tts_finished_at = tts_end
+            turn.tts_engine = self.tts.get_engine()
+
+        if self.pipeline.interrupt.should_stop():
+            if turn:
+                turn.aborted = True
+            audio_data = None
+
+        if audio_data:
+            volumes = await self.tts.get_audio_for_lip_sync(audio_data)
+            await self.ws_server.send_lip_sync(volumes)
+
+            audio_b64 = base64.b64encode(audio_data).decode("ascii")
+            audio_format = "wav" if audio_data[:4] == b"RIFF" else "mp3"
+            await self.ws_server.broadcast({
+                "type": "audio",
+                "data": audio_b64,
+                "format": audio_format,
+                "request_id": request_id,
+                "speech_id": speech_id,
+            })
+
+            if turn:
+                turn.audio_bytes = len(audio_data)
+                turn.audio_format = audio_format
+
+            duration_sec = self._calculate_audio_duration(audio_data, audio_format)
+            if turn:
+                turn.audio_duration_sec = duration_sec
+
+            try:
+                interrupted = await self.pipeline.interrupt.wait_for_interrupt(
+                    timeout=duration_sec + 0.5
+                )
+                if interrupted and turn:
+                    turn.aborted = True
+            except asyncio.CancelledError:
+                pass
+
+        was_interrupted = self.pipeline.interrupt.should_stop()
+        if turn:
+            turn.finished_at = _time.time()
+            logger.info(f"Turn complete: {turn.summary()}")
+            try:
+                await self.pipeline.memory.long_term.save_turn_log(turn)
+            except Exception as log_err:
+                logger.warning(f"Failed to save turn log: {log_err}")
+
+        # Always send speech_end (with interrupted flag if applicable)
+        await self.ws_server.broadcast({
+            "type": "speech_end",
+            "speech_id": speech_id,
+            "interrupted": was_interrupted,
+        })
+        await self.ws_server.send_status("idle")
+        self.pipeline.interrupt.set_state(PipelineState.IDLE)
+        self.pipeline.interrupt.clear_interrupt()
+        self.pipeline.interrupt.current_speech_id = None
+
+        if self.microphone:
+            self.microphone.stop_suppress()
+
+        # Start anti-echo silence period (py-xiaozhi pattern)
+        self._silence_period.start()
+
+    @staticmethod
+    def _calculate_audio_duration(audio_data: bytes, audio_format: str) -> float:
+        """Calculate actual audio duration from WAV header or estimate for MP3.
+
+        For WAV: parse header to get exact duration.
+        For MP3: estimate from compressed size.
+
+        Returns:
+            Duration in seconds.
+        """
+        if audio_format == "wav" and len(audio_data) > 44 and audio_data[:4] == b"RIFF":
+            try:
+                import struct
+                # WAV header: bytes 24-27 = sample rate, bytes 34-35 = bits per sample
+                # bytes 28-31 = byte rate (sample_rate * channels * bits_per_sample / 8)
+                byte_rate = struct.unpack_from('<I', audio_data, 28)[0]
+                # Data size = total size - header (44 bytes typically)
+                data_size = len(audio_data) - 44
+                if byte_rate > 0:
+                    return data_size / byte_rate
+            except Exception:
+                pass
+            # Fallback: CosyVoice default is 22050Hz 16-bit mono = 44100 bytes/sec
+            return max((len(audio_data) - 44) / 44100.0, 0.5)
+        else:
+            # MP3: rough estimate ~12000 bytes/sec at 128kbps
+            return max(len(audio_data) / 12000.0, 0.5)
 
     # ----------------------------------------------------------------
     # Boss auto-registration
@@ -433,22 +707,28 @@ class FukurakuSecretary:
     # Input Handlers
     # ----------------------------------------------------------------
 
-    async def _handle_text_input(self, text: str, websocket=None):
+    async def _handle_text_input(self, text: str, websocket=None, source: str = "chat"):
         """Handle text input from the WebSocket frontend.
 
         In full mode, requires voice authentication first (speaker_id set via
         voice recognition or authenticate_as command). In text-only mode,
         allows unauthenticated input for demo purposes.
 
+        Interrupt policy by source:
+            - 'chat': User text input — CAN interrupt current AI speech.
+            - 'danmaku': Live stream comments — NEVER interrupts, queued only.
+            - 'voice': Voice ASR result — interrupt handled by VAD barge-in.
+
         Args:
             text: User message text.
             websocket: The WebSocket client that sent the message.
+            source: Input source ('chat' | 'danmaku' | 'voice').
         """
         client_info = self.ws_server.get_client_info(websocket) if websocket else {}
         speaker_id = client_info.get("speaker_id")
         session_id = client_info.get("session_id")
         request_id = str(uuid.uuid4())[:8]
-        logger.info(f"[{request_id}] Text input: '{text}' (speaker={speaker_id})")
+        logger.info(f"[{request_id}] Text input: '{text}' (source={source}, speaker={speaker_id})")
 
         # Access control: in full mode, require authenticated speaker
         if not self.text_only and not client_info.get("authenticated", False):
@@ -457,6 +737,16 @@ class FukurakuSecretary:
                 "message": "声紋認証が必要です。マイクで話しかけてください。",
             })
             return
+
+        # Interrupt policy: chat can interrupt, danmaku NEVER interrupts
+        if source == "chat" and self.pipeline.interrupt.is_speaking:
+            old_speech_id = self.pipeline.interrupt.current_speech_id
+            await self.pipeline.interrupt.interrupt()
+            logger.info(f"[{request_id}] Text barge-in: interrupted speech {old_speech_id}")
+            # Give the streaming output handler time to notice the interrupt
+            await asyncio.sleep(0.1)
+        elif source == "danmaku" and self.pipeline.interrupt.is_speaking:
+            logger.info(f"[{request_id}] Danmaku queued (no interrupt): '{text[:30]}'")
 
         # Notify scheduler (resets idle timer)
         self.scheduler.notify_interaction()
@@ -471,6 +761,7 @@ class FukurakuSecretary:
             "speaker_id": speaker_id,
             "request_id": request_id,
             "session_id": session_id,
+            "source": source,
         })
 
     async def _handle_command(self, command: str, data=None, websocket=None):
@@ -721,8 +1012,15 @@ class FukurakuSecretary:
         # --- Interrupt command (barge-in) ---
         elif command == "interrupt":
             if self.pipeline.interrupt.is_speaking:
+                speech_id = self.pipeline.interrupt.current_speech_id
                 await self.pipeline.interrupt.interrupt()
-                logger.info("Speech interrupted by frontend")
+                logger.info(f"Speech interrupted by frontend (speech_id={speech_id})")
+                # Notify frontend to stop playback for this specific speech
+                await self.ws_server.broadcast({
+                    "type": "speech_end",
+                    "speech_id": speech_id,
+                    "interrupted": True,
+                })
 
         # --- Legacy commands (kept for backward compatibility) ---
         elif command == "set_llm_mode":
@@ -754,21 +1052,30 @@ class FukurakuSecretary:
         The frontend sends raw audio (base64-encoded webm/opus) via WebSocket.
         We convert it to PCM, run ASR + speaker ID in parallel, then process.
 
+        Important: We do NOT auto-interrupt here. The frontend handles barge-in
+        detection (VAD with high threshold) and sends an explicit 'interrupt'
+        command. Auto-interrupting on every audio input would cut off speech
+        when the audio is just background noise or echo.
+
         Args:
             audio_b64: Base64-encoded audio data.
             audio_format: MIME type (e.g., 'audio/webm').
             websocket: The WebSocket client that sent the audio.
         """
 
-        # Auto-interrupt: if AI is currently speaking and new audio arrives,
-        # interrupt the current speech first (like NEKO's speech_started event)
-        if self.pipeline.interrupt.is_speaking:
-            logger.info("Auto-interrupt: new audio input while AI speaking")
-            await self.pipeline.interrupt.interrupt()
-            # Also notify frontend to stop playback
-            await self.ws_server.broadcast({
-                "type": "speech_end",
-            })
+        # Anti-echo: skip audio received during silence period after TTS
+        # (py-xiaozhi inspired: prevents TTS echo from being picked up as input)
+        if self._silence_period.is_active():
+            logger.debug("Audio input during silence period — suppressed (anti-echo)")
+            return
+
+        # If AI is currently speaking, the frontend should have already sent
+        # an 'interrupt' command via barge-in. We do NOT auto-interrupt here
+        # because the audio might be noise or echo remnants.
+        # Just log and proceed — the interrupt handler takes care of stopping speech.
+        was_speaking = self.pipeline.interrupt.is_speaking
+        if was_speaking:
+            logger.debug("Audio input received while AI speaking — processing without auto-interrupt")
 
         await self.ws_server.send_status("processing")
         self.scheduler.notify_interaction()
@@ -783,11 +1090,14 @@ class FukurakuSecretary:
         logger.debug(f"Received audio from frontend: {len(audio_bytes)} bytes ({audio_format})")
 
         # Convert webm/opus → PCM int16 16kHz mono using ffmpeg
+        # Use -err_detect ignore_err to handle slightly malformed WebM from browser
         try:
             proc = await asyncio.to_thread(
                 subprocess.run,
                 [
-                    "ffmpeg", "-i", "pipe:",
+                    "ffmpeg",
+                    "-err_detect", "ignore_err",
+                    "-i", "pipe:",
                     "-f", "s16le", "-ar", "16000", "-ac", "1",
                     "-loglevel", "error",
                     "pipe:",
@@ -806,9 +1116,29 @@ class FukurakuSecretary:
             return
 
         if proc.returncode != 0 or not proc.stdout:
-            logger.warning(f"ffmpeg conversion failed: {proc.stderr[:200] if proc.stderr else 'no output'}")
-            await self.ws_server.send_status("idle")
-            return
+            # Retry with more lenient flags
+            try:
+                proc = await asyncio.to_thread(
+                    subprocess.run,
+                    [
+                        "ffmpeg",
+                        "-f", "webm", "-i", "pipe:",
+                        "-f", "s16le", "-ar", "16000", "-ac", "1",
+                        "-loglevel", "error",
+                        "pipe:",
+                    ],
+                    input=audio_bytes,
+                    capture_output=True,
+                    timeout=10,
+                )
+            except Exception:
+                pass
+
+            if not proc or proc.returncode != 0 or not proc.stdout:
+                logger.warning(f"ffmpeg conversion failed ({len(audio_bytes)}b): "
+                              f"{proc.stderr[:200] if proc and proc.stderr else 'no output'}")
+                await self.ws_server.send_status("idle")
+                return
 
         pcm_data = proc.stdout
         logger.debug(f"Converted to PCM: {len(pcm_data)} bytes ({len(pcm_data)/32000:.1f}s)")
@@ -984,7 +1314,13 @@ class FukurakuSecretary:
             await self.ws_server.send_status("listening")
             # Interrupt if AI is currently speaking
             if self.pipeline.interrupt.is_speaking:
+                speech_id = self.pipeline.interrupt.current_speech_id
                 await self.pipeline.interrupt.interrupt()
+                await self.ws_server.broadcast({
+                    "type": "speech_end",
+                    "speech_id": speech_id,
+                    "interrupted": True,
+                })
 
         async def on_speech_end():
             pass

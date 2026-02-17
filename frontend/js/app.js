@@ -26,6 +26,14 @@ let voiceInputMode = 'ptt';
 let currentAudioSource = null;  // Track current playing audio for interrupt
 let isAISpeaking = false;       // True while AI TTS is playing — suppresses VAD
 let vadGainNode = null;         // Gain node to mute mic input during AI speech
+let currentSpeechId = null;     // Track current speech turn ID (N.E.K.O pattern)
+
+// --- Streaming Audio Queue (Pipecat-inspired) ---
+// Multiple audio chunks share one speech_id; played sequentially for gapless output
+let audioQueue = [];            // Queue of {b64data, format, speechId, chunkIndex}
+let isPlayingQueue = false;     // True while processing the audio queue
+let isStreamingMode = false;    // True when backend sends streaming=true in speech_start
+let speechEndReceived = false;  // True when backend says no more chunks coming
 
 // --- Barge-in: user clicks mic while AI is speaking → interrupt ---
 // No automatic RMS-based barge-in (too unreliable with browser echo).
@@ -54,6 +62,18 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Load Live2D model
     await tryLoadModel();
+
+    // Click/tap on Live2D canvas to interrupt AI speech
+    const canvas = document.getElementById('live2d-canvas');
+    if (canvas) {
+        canvas.addEventListener('click', () => {
+            if (isAISpeaking) {
+                console.log('[App] Canvas tap: interrupting AI speech');
+                interruptAudio();
+                wsClient.sendCommand('interrupt', {});
+            }
+        });
+    }
 
     // Handle window resize
     window.addEventListener('resize', () => {
@@ -147,14 +167,17 @@ async function playAudioB64(b64data, format) {
             live2d.lipSync.startWithAnalyser(analyser);
         }
 
-        // Stop lip sync + echo suppression when audio finishes
+        // Stop lip sync + echo suppression when audio actually finishes playing
         source.onended = () => {
             currentAudioSource = null;
             isAISpeaking = false;
+            // Don't clear currentSpeechId here — let speech_end handle it
+            // This way the backend knows audio finished naturally
             if (live2d) {
                 live2d.setSpeaking(false);
                 live2d.lipSync.stop();
             }
+            console.log('[Audio] Playback finished naturally');
         };
 
         source.start(0);
@@ -167,19 +190,137 @@ async function playAudioB64(b64data, format) {
 
 /**
  * Interrupt current audio playback (for barge-in).
+ * Also clears the streaming audio queue.
  */
 function interruptAudio() {
+    // Clear the streaming audio queue
+    audioQueue = [];
+    isPlayingQueue = false;
+    isStreamingMode = false;
+    speechEndReceived = false;
+
     if (currentAudioSource) {
         try {
             currentAudioSource.stop();
         } catch (e) {}
         currentAudioSource = null;
-        isAISpeaking = false;
-        if (live2d) {
-            live2d.setSpeaking(false);
-            live2d.lipSync.stop();
+    }
+    isAISpeaking = false;
+    currentSpeechId = null;
+    if (live2d) {
+        live2d.setSpeaking(false);
+        live2d.lipSync.stop();
+    }
+    console.log('[Audio] Interrupted (queue cleared)');
+}
+
+/**
+ * Enqueue an audio chunk for sequential playback (streaming mode).
+ * @param {string} b64data - Base64-encoded audio
+ * @param {string} format - Audio format ('wav' or 'mp3')
+ * @param {string} speechId - Speech turn ID
+ * @param {number} chunkIndex - Chunk index within the turn
+ */
+function enqueueAudioChunk(b64data, format, speechId, chunkIndex) {
+    // Validate speech_id
+    if (speechId && currentSpeechId && speechId !== currentSpeechId) {
+        console.log('[AudioQueue] Discarding chunk for stale speech_id:', speechId);
+        return;
+    }
+
+    audioQueue.push({ b64data, format, speechId, chunkIndex });
+    console.log(`[AudioQueue] Enqueued chunk ${chunkIndex} (queue size: ${audioQueue.length})`);
+
+    // Start playing if not already
+    if (!isPlayingQueue) {
+        playNextInQueue();
+    }
+}
+
+/**
+ * Play the next audio chunk in the queue.
+ * Chains playback: each chunk's onended triggers the next.
+ */
+async function playNextInQueue() {
+    if (audioQueue.length === 0) {
+        if (speechEndReceived) {
+            // All chunks received and played — finalize
+            isPlayingQueue = false;
+            isAISpeaking = false;
+            currentSpeechId = null;
+            speechEndReceived = false;
+            updateStatus('idle', '待機中');
+            hideSubtitle();
+            if (live2d) {
+                live2d.setSpeaking(false);
+                live2d.lipSync.stop();
+            }
+            console.log('[AudioQueue] All chunks played, speech complete');
+        } else {
+            // More chunks may arrive — wait briefly then retry
+            isPlayingQueue = false;
+            console.log('[AudioQueue] Queue empty, waiting for more chunks...');
         }
-        console.log('[Audio] Interrupted');
+        return;
+    }
+
+    isPlayingQueue = true;
+    const item = audioQueue.shift();
+
+    // Validate speech_id (may have been interrupted while queued)
+    if (item.speechId && currentSpeechId && item.speechId !== currentSpeechId) {
+        console.log('[AudioQueue] Skipping stale chunk:', item.speechId);
+        playNextInQueue();
+        return;
+    }
+
+    if (isMuted) {
+        playNextInQueue();
+        return;
+    }
+
+    if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    try {
+        const binaryStr = atob(item.b64data);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+            bytes[i] = binaryStr.charCodeAt(i);
+        }
+
+        const audioBuffer = await audioContext.decodeAudioData(bytes.buffer);
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 512;
+        source.connect(analyser);
+        analyser.connect(audioContext.destination);
+
+        currentAudioSource = source;
+        isAISpeaking = true;
+
+        if (live2d) {
+            live2d.setSpeaking(true);
+            live2d.lipSync.startWithAnalyser(analyser);
+        }
+
+        source.onended = () => {
+            currentAudioSource = null;
+            // Don't set isAISpeaking=false here — playNextInQueue handles cleanup
+            // when queue is empty AND speechEndReceived is true
+            playNextInQueue();
+        };
+
+        source.start(0);
+        console.log(`[AudioQueue] Playing chunk ${item.chunkIndex} (${audioBuffer.duration.toFixed(1)}s, ${audioQueue.length} remaining)`);
+
+    } catch (e) {
+        console.error('[AudioQueue] Playback error:', e);
+        // Try next chunk
+        playNextInQueue();
     }
 }
 
@@ -213,10 +354,20 @@ function setupWSHandlers() {
     });
 
     wsClient.on('speech_start', (data) => {
+        // Track speech_id for this turn (N.E.K.O pattern)
+        currentSpeechId = data.speech_id || null;
         isAISpeaking = true;
+        isStreamingMode = !!data.streaming;
+        speechEndReceived = false;
+        audioQueue = [];  // Clear queue for new speech turn
         updateStatus('speaking', '発話中');
-        showSubtitle(data.text);
-        addChatMessage(data.text, 'assistant');
+
+        // In streaming mode, text arrives incrementally via subtitle updates
+        // In legacy mode, full text is in data.text
+        if (data.text) {
+            showSubtitle(data.text);
+            addChatMessage(data.text, 'assistant');
+        }
 
         // Apply emotion from speech data
         if (data.emotion && live2d && live2d.isLoaded) {
@@ -225,15 +376,47 @@ function setupWSHandlers() {
             document.getElementById('emotion-badge').textContent = `${emoji} ${data.emotion}`;
         }
 
-        // Barge-in: user can tap mic button to interrupt (manual barge-in)
+        console.log('[App] Speech started, speech_id=' + currentSpeechId,
+                     'streaming=' + isStreamingMode);
     });
 
-    wsClient.on('speech_end', () => {
-        // Stop any playing audio (handles backend-triggered interrupts)
-        interruptAudio();
-        updateStatus('idle', '待機中');
-        hideSubtitle();
-        if (live2d) live2d.stopLipSync();
+    wsClient.on('speech_end', (data) => {
+        const endSpeechId = data.speech_id || null;
+
+        // Ignore stale speech_end events from previous turns.
+        if (endSpeechId && currentSpeechId && endSpeechId !== currentSpeechId) {
+            console.log('[App] Ignoring stale speech_end for', endSpeechId,
+                        '(current:', currentSpeechId, ')');
+            return;
+        }
+
+        console.log('[App] Speech ended, speech_id=' + endSpeechId,
+                     'interrupted=' + !!data.interrupted,
+                     'queueLen=' + audioQueue.length,
+                     'playing=' + isPlayingQueue);
+
+        // Mark that no more chunks will arrive for this speech turn
+        speechEndReceived = true;
+
+        if (data.interrupted) {
+            // Immediate stop on interrupt
+            interruptAudio();
+            currentSpeechId = null;
+            isAISpeaking = false;
+            speechEndReceived = false;
+            updateStatus('idle', '待機中');
+            hideSubtitle();
+            if (live2d) live2d.stopLipSync();
+        } else if (!isPlayingQueue && audioQueue.length === 0) {
+            // All audio already finished playing
+            currentSpeechId = null;
+            isAISpeaking = false;
+            speechEndReceived = false;
+            updateStatus('idle', '待機中');
+            hideSubtitle();
+            if (live2d) live2d.stopLipSync();
+        }
+        // else: audio is still playing — let playNextInQueue handle cleanup
     });
 
     wsClient.on('lip_sync', (data) => {
@@ -242,10 +425,50 @@ function setupWSHandlers() {
         }
     });
 
-    // Handle base64 audio from backend
+    // Handle base64 audio from backend (legacy single-chunk mode)
     wsClient.on('audio', (data) => {
-        if (data.data) {
-            playAudioB64(data.data, data.format || 'wav');
+        if (!data.data) return;
+
+        // Validate speech_id: discard audio from interrupted/stale speech turns
+        const audioSpeechId = data.speech_id || null;
+        if (audioSpeechId && currentSpeechId && audioSpeechId !== currentSpeechId) {
+            console.log('[Audio] Discarding audio for stale speech_id:', audioSpeechId,
+                        '(current:', currentSpeechId, ')');
+            return;
+        }
+
+        playAudioB64(data.data, data.format || 'wav');
+    });
+
+    // Handle streaming audio chunks (Pipecat-inspired queue-based playback)
+    wsClient.on('audio_chunk', (data) => {
+        if (!data.data) return;
+
+        const chunkSpeechId = data.speech_id || null;
+        const chunkIndex = data.chunk_index || 0;
+
+        // Validate speech_id
+        if (chunkSpeechId && currentSpeechId && chunkSpeechId !== currentSpeechId) {
+            console.log('[AudioChunk] Discarding chunk for stale speech_id:', chunkSpeechId);
+            return;
+        }
+
+        // Enqueue for sequential playback
+        enqueueAudioChunk(data.data, data.format || 'wav', chunkSpeechId, chunkIndex);
+    });
+
+    // Handle full speech text (sent after streaming completes)
+    wsClient.on('speech_text', (data) => {
+        const textSpeechId = data.speech_id || null;
+        if (textSpeechId && currentSpeechId && textSpeechId !== currentSpeechId) {
+            return;
+        }
+
+        // Update the chat message with final complete text
+        if (data.text && isStreamingMode) {
+            // Replace the placeholder chat message with final text
+            addChatMessage(data.text, 'assistant');
+            showSubtitle(data.text);
         }
     });
 
@@ -266,6 +489,9 @@ function setupWSHandlers() {
                 addChatMessage(data.text, 'user');
             }
             lastSentText = null;
+        } else if (data.role === 'assistant') {
+            // Streaming subtitle: show incremental text as AI speaks
+            showSubtitle(data.text);
         }
     });
 
@@ -463,12 +689,19 @@ function sendChat() {
     const text = input.value.trim();
     if (!text) return;
 
+    // Text chat can interrupt AI speech (barge-in)
+    if (isAISpeaking) {
+        console.log('[Chat] Text barge-in: interrupting AI speech');
+        interruptAudio();
+        wsClient.sendCommand('interrupt', {});
+    }
+
     // Display user message
     addChatMessage(text, 'user');
     lastSentText = text;
 
-    // Send to backend
-    wsClient.sendTextInput(text);
+    // Send to backend with source='chat' (chat can interrupt, danmaku cannot)
+    wsClient.sendTextInput(text, 'chat');
 
     // Update status
     updateStatus('processing', '考え中...');
@@ -537,8 +770,8 @@ let vadSpeaking = false;
 let vadSilenceStart = 0;
 const VAD_SILENCE_MS = 800;    // ms of silence to end an utterance
 const VAD_THRESHOLD = 0.02;    // RMS threshold for normal speech detection (raised to avoid noise)
-const VAD_BARGEIN_THRESHOLD = 0.12; // High threshold for barge-in (human voice near mic)
-const VAD_MIN_SPEECH_MS = 600; // Minimum speech duration to trigger barge-in
+const VAD_BARGEIN_THRESHOLD = 0.04; // Barge-in threshold (lowered: 0.04 catches normal speech near mic)
+const VAD_MIN_SPEECH_MS = 250; // Minimum speech duration for barge-in (250ms = quick interrupt)
 let vadSpeechStart = 0;        // When current speech started (for min duration check)
 
 function toggleVoiceInput() {
@@ -686,7 +919,7 @@ function startPTTRecording() {
         }
     };
 
-    mediaRecorder.start(250);
+    mediaRecorder.start();  // No timeslice — single complete blob on stop
     console.log('[Voice] PTT recording started, state=' + mediaRecorder.state);
 }
 
@@ -803,7 +1036,10 @@ function vadPoll() {
             console.log('[Voice] VAD: speech started (rms=' + rms.toFixed(4) + ')');
             updateStatus('listening', '聞いています...');
 
-            // Start a new MediaRecorder for this utterance
+            // Start a new MediaRecorder for this utterance.
+            // NO timeslice — record continuously, get one complete Blob on stop().
+            // This ensures valid WebM with EBML header (timeslice can produce
+            // incomplete headers if MediaRecorder is stopped mid-chunk).
             audioChunks = [];
             try {
                 mediaRecorder = new MediaRecorder(mediaStream, {
@@ -812,7 +1048,7 @@ function vadPoll() {
                 mediaRecorder.ondataavailable = (e) => {
                     if (e.data.size > 0) audioChunks.push(e.data);
                 };
-                mediaRecorder.start(100);
+                mediaRecorder.start();  // No timeslice → single complete blob on stop
             } catch (e) {
                 console.error('[Voice] VAD: Failed to start MediaRecorder:', e);
                 vadSpeaking = false;
